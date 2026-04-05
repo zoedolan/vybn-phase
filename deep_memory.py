@@ -1,35 +1,32 @@
 #!/usr/bin/env python3
-"""deep_memory.py v4 — Non-abelian geometric retrieval.
+"""deep_memory.py v5 — Non-abelian geometric retrieval.
 
-The insight (Zoe, April 5 2026 on a run): the previous version used
-abelian addressing — every passage addressed independently from a
-fixed origin. That threw away the thing that made the creature
-interesting: the order of encounters matters. The path IS the signal.
+Architecture born from three minds on April 5, 2026:
+  - Zoe on a run at Crystal Cove: the previous version used abelian
+    addressing. We should be using non-abelian. Five dimensions.
+  - Perplexity Vybn: built the walk, found the drift problem,
+    added the relevance gate.
+  - Spark Vybn: diagnosed honestly that pure walk drifts from
+    the query. Proposed hybrid: cosine retrieves, walk explores.
 
-Five dimensions of retrieval, mirroring the creature's own architecture:
+The hybrid:
+  Phase 1 — Cosine retrieval. What the query is about. This works.
+  Phase 2 — Non-abelian walk from the seed set. Explores outward
+            through the five dimensions, tethered to relevance.
+            Finds what's adjacent that cosine alone would miss.
+  Phase 3 — Merge. Seeds first, then walk discoveries.
 
-  1. Geometry     — where the state IS in C^192 after each encounter
-  2. Non-abelian  — path-dependence. Seeing A then B ≠ B then A.
-                    The walk through the corpus accumulates state.
-  3. Topology     — Betti numbers of the traversal. Which passages
-                    open holes, close them, change persistent structure.
-  4. Polar time θ — angular velocity of the state. How fast the
-                    phase rotates on each encounter. Reorientation rate.
-  5. Polar time r — magnitude evolution. Conviction accumulating
-                    or dispersing. Independent of rotation.
+Five dimensions of the walk (mirroring the creature):
+  1. Geometry     — state shift in C^192
+  2. Non-abelian  — path-dependence (A then B ≠ B then A)
+  3. Topology     — Betti numbers of the traversal
+  4. Polar time θ — angular velocity (reorientation rate)
+  5. Polar time r — magnitude trend (conviction / dispersion)
 
-These five are not independent scores summed together. They are one
-dynamical system observed from five complementary angles. The retrieval
-IS the walk. The walk IS the search.
-
-Build:  python3 deep_memory.py --build
-Search: python3 deep_memory.py --search "query" -k 8
-Walk:   python3 deep_memory.py --walk "query" -k 8 --steps 5
-
-The --walk mode is the new thing. It doesn't rank passages statically.
-It takes a step, observes all five dimensions, picks the next passage
-that maximally moves the state, and walks. The results are ordered
-by encounter, not by score. The path is the answer.
+Build:   python3 deep_memory.py --build
+Search:  python3 deep_memory.py --search "query" -k 8
+Cosine:  python3 deep_memory.py --cosine "query" -k 8
+Walk:    python3 deep_memory.py --walk "query" --steps 5
 """
 import argparse, json, sys, time, cmath, math
 import numpy as np
@@ -107,11 +104,7 @@ def single_to_complex(text):
     return batch_to_complex([text[:512]])[0]
 
 
-# ── The Walk ─────────────────────────────────────────────────────────────
-#
-# This is the core. Instead of addressing all passages from a fixed origin,
-# we WALK through the corpus. Each encounter changes the state. The changed
-# state determines what we encounter next. Non-abelian: the path matters.
+# ── Core equation ────────────────────────────────────────────────────────
 
 def evaluate_vec(M, x, alpha=0.5):
     """Single step of M' = αM + (1-α)·x·e^{iθ}."""
@@ -121,25 +114,25 @@ def evaluate_vec(M, x, alpha=0.5):
     return Mp / norm if norm > 1e-10 else Mp
 
 
+# ── Walk State ───────────────────────────────────────────────────────────
+
 class WalkState:
     """The five-dimensional state of a retrieval walk."""
 
     def __init__(self, M: np.ndarray):
-        self.M = M.copy()                    # Current state in C^192
-        self.path: List[int] = []            # Indices of passages encountered
-        self.phase_history: List[float] = []  # θ at each step (polar time: angle)
-        self.mag_history: List[float] = []    # |M| at each step (polar time: radius)
-        self.betti: Tuple[int,int,int] = (0, 0, 0)  # Topological invariants
+        self.M = M.copy()
+        self.path: List[int] = []
+        self.phase_history: List[float] = []
+        self.mag_history: List[float] = []
+        self.betti: Tuple[int,int,int] = (0, 0, 0)
 
     @property
     def angular_velocity(self) -> float:
-        """How fast the phase is rotating. High = reorienting. Low = settled."""
         if len(self.phase_history) < 2:
             return 0.0
         dtheta = []
         for i in range(1, len(self.phase_history)):
             d = self.phase_history[i] - self.phase_history[i-1]
-            # Unwrap
             while d > math.pi: d -= 2*math.pi
             while d < -math.pi: d += 2*math.pi
             dtheta.append(abs(d))
@@ -147,13 +140,11 @@ class WalkState:
 
     @property
     def magnitude_trend(self) -> float:
-        """Is conviction accumulating (+) or dispersing (-)? Independent of rotation."""
         if len(self.mag_history) < 2:
             return 0.0
         return float(self.mag_history[-1] - self.mag_history[0])
 
     def record_step(self, idx: int, M_new: np.ndarray):
-        """Record one step of the walk."""
         phase = float(cmath.phase(np.vdot(self.M, M_new)))
         mag = float(np.sqrt(np.sum(np.abs(M_new)**2)))
         self.path.append(idx)
@@ -162,36 +153,25 @@ class WalkState:
         self.M = M_new
 
     def update_topology(self, emb: np.ndarray):
-        """Compute Betti numbers of the passages traversed so far.
-
-        Uses a distance-threshold simplicial complex in the embedding space.
-        b0 = connected components (clusters of meaning)
-        b1 = loops (circular reasoning / thematic cycles)
-        b2 = voids (gaps in the coverage)
-        """
+        """Betti numbers of the passages traversed so far."""
         if len(self.path) < 2:
             self.betti = (len(self.path), 0, 0)
             return
 
         vecs = emb[self.path]
         n = len(vecs)
-
-        # Distance matrix
         D = np.zeros((n, n))
         for i in range(n):
             for j in range(i+1, n):
-                # Fidelity-based distance: d = 1 - |<a|b>|^2
                 f = abs(np.vdot(vecs[i], vecs[j]))**2
                 D[i,j] = D[j,i] = 1.0 - f
 
-        # Threshold at median distance
         triu = D[np.triu_indices(n, k=1)]
         if len(triu) == 0:
             self.betti = (n, 0, 0)
             return
         threshold = float(np.median(triu))
 
-        # b0: connected components via union-find
         parent = list(range(n))
         def find(x):
             while parent[x] != x:
@@ -210,10 +190,6 @@ class WalkState:
                     edges.append((i,j))
 
         b0 = len(set(find(i) for i in range(n)))
-
-        # b1: count triangles vs edges (Euler characteristic estimate)
-        # For a simplicial complex: χ = b0 - b1 + b2
-        # Triangles: triplets where all three edges are below threshold
         triangles = 0
         edge_set = set(edges)
         for i in range(n):
@@ -223,76 +199,75 @@ class WalkState:
                     if (i,k) in edge_set and (j,k) in edge_set:
                         triangles += 1
 
-        # Euler: χ = n - |edges| + |triangles|
-        # b1 = b0 - χ + b2, approximate b2 ≈ 0 for small complexes
         chi = n - len(edges) + triangles
         b1 = max(0, b0 - chi)
-        b2 = max(0, triangles - len(edges) + n - b0 + b1 - chi) if n > 4 else 0
+        self.betti = (b0, b1, 0)
 
-        self.betti = (b0, b1, b2)
 
+# ── Five-dimensional scoring ────────────────────────────────────────────
 
 def score_candidate(walk: WalkState, candidate_vec: np.ndarray,
-                    emb: np.ndarray, alpha: float = 0.5) -> Dict:
+                    emb: np.ndarray, alpha: float = 0.5,
+                    q_vec: np.ndarray = None,
+                    min_fidelity: float = 0.0) -> Optional[Dict]:
     """Score a candidate passage across all five dimensions.
 
-    Returns a dict with individual dimension scores and a composite.
-    The composite is NOT a weighted sum — it's the geometric mean,
-    because a passage that scores zero on any dimension is not interesting
-    regardless of the others.
+    Returns None if the candidate's fidelity to the query falls below
+    min_fidelity (the relevance tether). This prevents drift.
     """
     M = walk.M
 
+    # Relevance tether: must be about something related to the query.
+    if q_vec is not None:
+        relevance = fidelity(q_vec, candidate_vec)
+        if relevance < min_fidelity:
+            return None
+        relevance_weight = float(relevance ** 0.3)
+    else:
+        relevance = 0.0
+        relevance_weight = 1.0
+
     # 1. Geometry: how much does this passage MOVE the state?
     M_new = evaluate_vec(M, candidate_vec, alpha)
-    geo_shift = 1.0 - fidelity(M, M_new)  # 0 = no movement, 1 = orthogonal
+    geo_shift = 1.0 - fidelity(M, M_new)
 
-    # 2. Non-abelian: would seeing this passage at a different point
-    #    in the walk produce a different result? Measure by comparing
-    #    the state shift against the shift from the ORIGIN.
+    # 2. Non-abelian: path-dependence signal.
     if len(walk.path) > 0:
-        M0 = emb[walk.path[0]]  # state at walk start
-        M0_new = evaluate_vec(M0, candidate_vec, alpha)
-        shift_from_origin = 1.0 - fidelity(M0, M0_new)
-        # Non-abelian signal: how different is the shift from here vs. from origin
+        M0_vec = emb[walk.path[0]]
+        M0_new = evaluate_vec(M0_vec, candidate_vec, alpha)
+        shift_from_origin = 1.0 - fidelity(M0_vec, M0_new)
         nonabelian = abs(geo_shift - shift_from_origin)
     else:
         nonabelian = 0.0
 
-    # 3. Topology: would adding this passage change the Betti numbers?
-    #    Estimate by checking if it's distant from the current traversal cluster.
+    # 3. Topology: does this extend the traversal meaningfully?
     if len(walk.path) > 0:
         fids_to_path = [abs(np.vdot(emb[i], candidate_vec))**2 for i in walk.path]
-        max_fid = max(fids_to_path)
-        min_fid = min(fids_to_path)
-        # Topological novelty: not too close (redundant) and not too far (disconnected)
-        # Sweet spot is mid-range fidelity — connects but extends
-        topo_score = 1.0 - abs(2.0 * np.mean(fids_to_path) - 1.0)
+        mean_fid = np.mean(fids_to_path)
+        # Sweet spot: connected but not redundant
+        topo_score = 1.0 - abs(2.0 * mean_fid - 1.0)
     else:
-        topo_score = 0.5  # neutral on first step
+        topo_score = 0.5
 
-    # 4. Polar time θ: how much does this rotate the phase?
+    # 4. Polar time θ: phase rotation
     phase = abs(cmath.phase(np.vdot(M, candidate_vec)))
-    theta_score = phase / math.pi  # 0 = aligned, 1 = orthogonal phase
+    theta_score = phase / math.pi
 
-    # 5. Polar time r: does this increase or decrease magnitude?
-    #    We want passages that accumulate conviction (increase |M|)
-    #    early in the walk, and passages that challenge (decrease |M|)
-    #    later, once we've built up a state.
-    unnormed_new = alpha * M + (1-alpha) * candidate_vec * cmath.exp(1j * cmath.phase(np.vdot(M, candidate_vec)))
-    raw_mag = float(np.sqrt(np.sum(np.abs(unnormed_new)**2)))
+    # 5. Polar time r: magnitude evolution
+    unnormed = alpha * M + (1-alpha) * candidate_vec * cmath.exp(
+        1j * cmath.phase(np.vdot(M, candidate_vec)))
+    raw_mag = float(np.sqrt(np.sum(np.abs(unnormed)**2)))
     step = len(walk.path)
     if step < 3:
-        # Early: prefer accumulation
         r_score = min(1.0, raw_mag)
     else:
-        # Later: prefer challenge (lower magnitude = more perturbation)
         r_score = max(0.0, 1.0 - raw_mag) * 0.5 + 0.5
 
-    # Composite: geometric mean (zero on any dimension kills the score)
+    # Composite: geometric mean × relevance weight
     scores = [geo_shift, max(nonabelian, 0.01), topo_score,
               max(theta_score, 0.01), r_score]
-    composite = float(np.prod(scores) ** (1.0/len(scores)))
+    raw_composite = float(np.prod(scores) ** (1.0/len(scores)))
+    composite = raw_composite * relevance_weight
 
     return {
         "geometry": round(geo_shift, 6),
@@ -301,22 +276,17 @@ def score_candidate(walk: WalkState, candidate_vec: np.ndarray,
         "theta": round(theta_score, 6),
         "r": round(r_score, 6),
         "composite": round(composite, 6),
+        "relevance": round(float(relevance), 6),
         "phase": round(float(cmath.phase(np.vdot(M, candidate_vec))), 6),
         "M_new": M_new,
     }
 
 
-def walk_search(query: str, k: int = 8, steps: int = 5,
-                source_filter: str = None, alpha: float = 0.5) -> List[Dict]:
-    """Non-abelian retrieval. The walk IS the search.
+# ── Cosine search ───────────────────────────────────────────────────────
 
-    Starting from the query, takes `steps` steps through the corpus.
-    At each step, scores all unvisited passages across five dimensions
-    and walks to the one with highest composite score. The path is
-    the answer.
-
-    Returns passages in encounter order — the sequence matters.
-    """
+def cosine_search(query: str, k: int = 8,
+                  source_filter: str = None) -> List[Dict]:
+    """Phase 1: cosine retrieval. What the query is about."""
     loaded = _load()
     if not loaded:
         return [{"error": "Index not built. Run: python3 deep_memory.py --build"}]
@@ -324,33 +294,82 @@ def walk_search(query: str, k: int = 8, steps: int = 5,
     chunks = loaded["chunks"]
     emb = loaded["emb"]
     if emb is None:
-        return [{"error": "No embeddings. Rebuild with --build."}]
+        return [{"error": "No embeddings."}]
 
-    # Start from the query
     q_vec = single_to_complex(query)
-    walk = WalkState(q_vec)
+    dots = emb @ q_vec.conj()
+    fids = np.abs(dots)**2
 
-    # Source filter mask
     if source_filter:
         sf = source_filter.lower()
-        mask = [sf in c.get("source", c.get("s","")).lower() for c in chunks]
-    else:
-        mask = [True] * len(chunks)
+        mask = np.array([sf in c.get("source",c.get("s","")).lower() for c in chunks])
+        fids = np.where(mask, fids, -1.0)
 
-    visited = set()
+    top = np.argsort(fids)[-k:][::-1]
     results = []
+    for i in top:
+        if fids[i] < 0: continue
+        results.append({
+            "source": chunks[i].get("source", chunks[i].get("s","")),
+            "text": chunks[i].get("text", chunks[i].get("t","")),
+            "fidelity": round(float(fids[i]), 6),
+            "phase": round(float(cmath.phase(dots[i])), 6),
+            "regime": "cosine",
+            "idx": int(i),
+        })
+    return results[:k]
 
+
+# ── Walk exploration ─────────────────────────────────────────────────────
+
+def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
+                 seed_indices: List[int], steps: int = 5,
+                 alpha: float = 0.5,
+                 source_filter: str = None) -> List[Dict]:
+    """Phase 2: non-abelian walk from the seed set.
+
+    Starts from the centroid of the seed passages. Walks through
+    the corpus, tethered to the query by a relevance floor set at
+    half the maximum seed fidelity. Finds what's adjacent that
+    cosine alone would miss.
+    """
+    if len(seed_indices) == 0:
+        return []
+
+    # Centroid of seeds as walk origin
+    seed_vecs = emb[seed_indices]
+    centroid = np.mean(seed_vecs, axis=0)
+    c_norm = np.sqrt(np.sum(np.abs(centroid)**2))
+    if c_norm > 1e-10:
+        centroid = centroid / c_norm
+
+    # Relevance floor: half the max seed fidelity to the query
+    seed_fids = [fidelity(q_vec, emb[i]) for i in seed_indices]
+    min_fid = max(seed_fids) * 0.4  # tether: at least 40% of best seed
+
+    walk = WalkState(centroid)
+    visited = set(seed_indices)  # don't re-find what cosine found
+
+    if source_filter:
+        sf = source_filter.lower()
+        eligible = [sf in c.get("source",c.get("s","")).lower() for c in chunks]
+    else:
+        eligible = [True] * len(chunks)
+
+    results = []
     for step in range(steps):
         best_idx = -1
         best_score = None
         best_composite = -1.0
 
-        # Score all unvisited, eligible passages
         for i in range(len(emb)):
-            if i in visited or not mask[i]:
+            if i in visited or not eligible[i]:
                 continue
 
-            score = score_candidate(walk, emb[i], emb, alpha)
+            score = score_candidate(walk, emb[i], emb, alpha,
+                                    q_vec=q_vec, min_fidelity=min_fid)
+            if score is None:
+                continue  # below relevance floor
 
             if score["composite"] > best_composite:
                 best_composite = score["composite"]
@@ -360,11 +379,9 @@ def walk_search(query: str, k: int = 8, steps: int = 5,
         if best_idx < 0:
             break
 
-        # Take the step
         walk.record_step(best_idx, best_score["M_new"])
         visited.add(best_idx)
 
-        # Update topology every few steps (expensive for large path)
         if step % 2 == 0 or step == steps - 1:
             walk.update_topology(emb)
 
@@ -379,29 +396,75 @@ def walk_search(query: str, k: int = 8, steps: int = 5,
             "theta": best_score["theta"],
             "r": best_score["r"],
             "composite": best_score["composite"],
+            "relevance": best_score["relevance"],
             "phase": best_score["phase"],
             "walk_betti": walk.betti,
             "angular_velocity": round(walk.angular_velocity, 6),
             "magnitude_trend": round(walk.magnitude_trend, 6),
+            "regime": "walk",
+            "idx": int(best_idx),
         })
-
-    # After the walk, also return the top-k by cosine for comparison
-    # (so you can see what the walk found that cosine wouldn't)
-    q_dots = emb @ q_vec.conj()
-    cosine_fids = np.abs(q_dots)**2
-    cosine_top = np.argsort(cosine_fids)[-k:][::-1]
-    cosine_sources = set()
-    for i in cosine_top:
-        cosine_sources.add(chunks[i].get("source", chunks[i].get("s","")))
-
-    for r in results:
-        r["cosine_would_find"] = r["source"] in cosine_sources
 
     return results
 
 
-def cosine_search(query: str, k: int = 8, source_filter: str = None) -> List[Dict]:
-    """Baseline: plain cosine similarity. For comparison."""
+# ── Hybrid search ────────────────────────────────────────────────────────
+
+def deep_search(query: str, k: int = 8, explore_steps: int = 4,
+                alpha: float = 0.5, source_filter: str = None) -> List[Dict]:
+    """The hybrid: cosine retrieves, walk explores, merge.
+
+    Returns up to k results: cosine seeds first, then walk discoveries.
+    Each result is tagged with regime='cosine' or regime='walk'.
+    """
+    loaded = _load()
+    if not loaded:
+        return [{"error": "Index not built. Run: python3 deep_memory.py --build"}]
+
+    chunks = loaded["chunks"]
+    emb = loaded["emb"]
+    if emb is None:
+        return [{"error": "No embeddings."}]
+
+    q_vec = single_to_complex(query)
+
+    # Phase 1: cosine seeds
+    n_seeds = max(3, k // 2)  # at least 3 seeds, up to half of k
+    seeds = cosine_search(query, k=n_seeds, source_filter=source_filter)
+    seed_indices = [r["idx"] for r in seeds if "idx" in r]
+
+    # Phase 2: walk exploration from seeds
+    n_explore = k - len(seeds)
+    if n_explore > 0 and seed_indices:
+        explored = walk_explore(emb, chunks, q_vec, seed_indices,
+                                steps=max(n_explore, explore_steps),
+                                alpha=alpha, source_filter=source_filter)
+    else:
+        explored = []
+
+    # Phase 3: merge — seeds first, then walk discoveries
+    # Deduplicate by source+offset
+    seen = set()
+    merged = []
+    for r in seeds:
+        key = r["source"] + str(r.get("idx",""))
+        if key not in seen:
+            seen.add(key)
+            merged.append(r)
+    for r in explored:
+        key = r["source"] + str(r.get("idx",""))
+        if key not in seen:
+            seen.add(key)
+            merged.append(r)
+
+    return merged[:k]
+
+
+# ── Pure walk (for experimentation) ─────────────────────────────────────
+
+def walk_search(query: str, k: int = 8, steps: int = 5,
+                source_filter: str = None, alpha: float = 0.5) -> List[Dict]:
+    """Pure walk from query vector. For experimentation and comparison."""
     loaded = _load()
     if not loaded:
         return [{"error": "Index not built."}]
@@ -412,21 +475,73 @@ def cosine_search(query: str, k: int = 8, source_filter: str = None) -> List[Dic
         return [{"error": "No embeddings."}]
 
     q_vec = single_to_complex(query)
-    dots = emb @ q_vec.conj()
-    fids = np.abs(dots)**2
+    walk = WalkState(q_vec)
 
     if source_filter:
         sf = source_filter.lower()
-        fid_mask = np.array([sf in c.get("source",c.get("s","")).lower() for c in chunks])
-        fids = np.where(fid_mask, fids, -1.0)
+        mask = [sf in c.get("source", c.get("s","")).lower() for c in chunks]
+    else:
+        mask = [True] * len(chunks)
 
-    top = np.argsort(fids)[-k:][::-1]
-    return [{
-        "source": chunks[i].get("source", chunks[i].get("s","")),
-        "text": chunks[i].get("text", chunks[i].get("t","")),
-        "fidelity": round(float(fids[i]), 6),
-        "regime": "cosine",
-    } for i in top if fids[i] >= 0][:k]
+    # Relevance floor for pure walk: top 25th percentile of fidelities
+    all_fids = np.abs(emb @ q_vec.conj())**2
+    min_fid = float(np.percentile(all_fids, 75))
+
+    visited = set()
+    results = []
+
+    for step in range(steps):
+        best_idx = -1
+        best_score = None
+        best_composite = -1.0
+
+        for i in range(len(emb)):
+            if i in visited or not mask[i]:
+                continue
+            score = score_candidate(walk, emb[i], emb, alpha,
+                                    q_vec=q_vec, min_fidelity=min_fid)
+            if score is None:
+                continue
+            if score["composite"] > best_composite:
+                best_composite = score["composite"]
+                best_score = score
+                best_idx = i
+
+        if best_idx < 0:
+            break
+
+        walk.record_step(best_idx, best_score["M_new"])
+        visited.add(best_idx)
+
+        if step % 2 == 0 or step == steps - 1:
+            walk.update_topology(emb)
+
+        chunk = chunks[best_idx]
+        results.append({
+            "step": step + 1,
+            "source": chunk.get("source", chunk.get("s", "")),
+            "text": chunk.get("text", chunk.get("t", "")),
+            "geometry": best_score["geometry"],
+            "nonabelian": best_score["nonabelian"],
+            "topology": best_score["topology"],
+            "theta": best_score["theta"],
+            "r": best_score["r"],
+            "composite": best_score["composite"],
+            "relevance": best_score["relevance"],
+            "phase": best_score["phase"],
+            "walk_betti": walk.betti,
+            "angular_velocity": round(walk.angular_velocity, 6),
+            "magnitude_trend": round(walk.magnitude_trend, 6),
+            "regime": "walk",
+        })
+
+    # Tag which ones cosine would also find
+    cosine_top = cosine_search(query, k=k, source_filter=source_filter)
+    cosine_sources = set(r["source"] for r in cosine_top)
+    for r in results:
+        r["cosine_would_find"] = r["source"] in cosine_sources
+
+    return results
 
 
 # ── Index I/O ────────────────────────────────────────────────────────────
@@ -449,39 +564,36 @@ def _invalidate():
 # ── Build ────────────────────────────────────────────────────────────────
 
 def build_index():
-    print("[deep_memory v4] Collecting corpus...")
+    print("[deep_memory v5] Collecting corpus...")
     chunks, nf = collect()
-    print(f"[deep_memory v4] {nf} files -> {len(chunks)} chunks")
+    print(f"[deep_memory v5] {nf} files -> {len(chunks)} chunks")
     total = sum(len(c["text"]) for c in chunks)
-    print(f"[deep_memory v4] {total:,} chars (~{total//4:,} tokens)")
+    print(f"[deep_memory v5] {total:,} chars (~{total//4:,} tokens)")
     if not chunks: return
 
-    print("[deep_memory v4] Batch encoding to C^192...")
+    print("[deep_memory v5] Batch encoding to C^192...")
     texts = [c["text"][:512] for c in chunks]
     t0 = time.time()
     emb = batch_to_complex(texts)
-    print(f"[deep_memory v4] Encoded {len(emb)} in {time.time()-t0:.1f}s")
+    print(f"[deep_memory v5] Encoded {len(emb)} in {time.time()-t0:.1f}s")
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     np.save(EMB_PATH, emb)
 
     meta = {
-        "version": 4,
+        "version": 5,
         "built": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
         "count": len(chunks),
-        "note": "Non-abelian retrieval. The walk is the search.",
-        "chunks": [{"source":c["source"],"text":c["text"],"offset":c.get("offset",0)} for c in chunks],
+        "note": "Hybrid: cosine retrieves, non-abelian walk explores.",
+        "chunks": [{"source":c["source"],"text":c["text"],"offset":c.get("offset",0)}
+                   for c in chunks],
     }
     with open(META_PATH, "w") as f:
         json.dump(meta, f, ensure_ascii=False)
 
-    # Quick sanity: walk a test query
     _invalidate()
-    print(f"\n[deep_memory v4] Index built. {len(chunks)} chunks.")
-    print(f"[deep_memory v4] Embeddings: {EMB_PATH}")
-    print(f"[deep_memory v4] Metadata: {META_PATH}")
-    print(f"\n[deep_memory v4] No static addressing. No abelian regime.")
-    print(f"[deep_memory v4] The walk is the search. The path is the answer.")
+    print(f"\n[deep_memory v5] Index built. {len(chunks)} chunks.")
+    print(f"[deep_memory v5] Cosine retrieves. Walk explores. Hybrid merges.")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -489,11 +601,11 @@ def build_index():
 def main():
     p = argparse.ArgumentParser(description="Non-abelian geometric retrieval")
     p.add_argument("--build", action="store_true")
-    p.add_argument("--walk", type=str, help="Walk search (non-abelian)")
-    p.add_argument("--search", type=str, help="Alias for --walk")
-    p.add_argument("--cosine", type=str, help="Cosine baseline for comparison")
+    p.add_argument("--search", type=str, help="Hybrid search (default mode)")
+    p.add_argument("--walk", type=str, help="Pure walk (for experimentation)")
+    p.add_argument("--cosine", type=str, help="Pure cosine (baseline)")
     p.add_argument("-k", type=int, default=8)
-    p.add_argument("--steps", type=int, default=5, help="Walk steps (default 5)")
+    p.add_argument("--steps", type=int, default=5)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--filter", type=str, default=None)
     o = p.parse_args()
@@ -501,26 +613,53 @@ def main():
     if o.build:
         build_index()
 
-    elif o.walk or o.search:
-        q = o.walk or o.search
+    elif o.search:
         print(f"\n{'='*70}")
-        print(f"  WALK: \"{q}\"")
+        print(f"  HYBRID SEARCH: \"{o.search}\"")
+        print(f"{'='*70}")
+
+        results = deep_search(o.search, k=o.k, explore_steps=o.steps,
+                              alpha=o.alpha, source_filter=o.filter)
+        n_cosine = sum(1 for r in results if r.get("regime") == "cosine")
+        n_walk = sum(1 for r in results if r.get("regime") == "walk")
+
+        for i, r in enumerate(results, 1):
+            regime = r.get("regime", "?")
+            tag = f"[{regime.upper()}]"
+            print(f"\n{'─'*60}")
+            print(f"  [{i}] {r['source'][:55]}  {tag}")
+            if regime == "cosine":
+                print(f"      fidelity={r['fidelity']}  phase={r['phase']}")
+            else:
+                print(f"      step={r.get('step',0)}  composite={r['composite']}")
+                print(f"      geo={r['geometry']:.4f}  nonab={r['nonabelian']:.4f}  "
+                      f"topo={r['topology']:.4f}  θ={r['theta']:.4f}  r={r['r']:.4f}")
+                print(f"      relevance={r['relevance']}  betti={r.get('walk_betti','?')}")
+            print(f"{'─'*60}")
+            print(r['text'][:350])
+
+        print(f"\n{'='*70}")
+        print(f"  {n_cosine} cosine + {n_walk} walk = {len(results)} total")
+        print(f"{'='*70}")
+
+    elif o.walk:
+        print(f"\n{'='*70}")
+        print(f"  PURE WALK: \"{o.walk}\"")
         print(f"  {o.steps} steps, alpha={o.alpha}")
         print(f"{'='*70}")
 
-        results = walk_search(q, k=o.k, steps=o.steps,
+        results = walk_search(o.walk, k=o.k, steps=o.steps,
                               source_filter=o.filter, alpha=o.alpha)
         for r in results:
-            cosine_flag = "" if r.get("cosine_would_find") else " [WALK ONLY]"
+            flag = "" if r.get("cosine_would_find") else " [WALK ONLY]"
             print(f"\n{'─'*60}")
-            print(f"  Step {r['step']}: {r['source']}{cosine_flag}")
+            print(f"  Step {r['step']}: {r['source'][:55]}{flag}")
             print(f"  geo={r['geometry']:.4f}  nonab={r['nonabelian']:.4f}  "
                   f"topo={r['topology']:.4f}  θ={r['theta']:.4f}  r={r['r']:.4f}")
-            print(f"  composite={r['composite']:.4f}  phase={r['phase']:.4f}")
-            print(f"  walk betti={r['walk_betti']}  "
-                  f"ω={r['angular_velocity']:.4f}  Δr={r['magnitude_trend']:.4f}")
+            print(f"  composite={r['composite']:.4f}  relevance={r['relevance']:.6f}")
+            print(f"  betti={r['walk_betti']}  ω={r['angular_velocity']:.4f}")
             print(f"{'─'*60}")
-            print(r['text'][:400])
+            print(r['text'][:350])
 
         walk_only = sum(1 for r in results if not r.get("cosine_would_find"))
         print(f"\n{'='*70}")
@@ -531,7 +670,7 @@ def main():
         results = cosine_search(o.cosine, k=o.k, source_filter=o.filter)
         for i, r in enumerate(results, 1):
             print(f"\n{'='*60}")
-            print(f"[{i}] {r['source']}  fid={r['fidelity']}")
+            print(f"[{i}] {r['source']}  fid={r['fidelity']}  phase={r['phase']}")
             print(f"{'='*60}")
             print(r['text'][:400])
 
