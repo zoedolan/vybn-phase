@@ -770,7 +770,643 @@
         2.2077637556910816
       ],
       "contributed_at": "2026-04-05T08:27:47.660454+00:00"
+    },
+    {
+      "label": "vybn_mind_current",
+      "n": 3,
+      "vectors": [
+        {
+          "C4": [
+            1.6775975020578482,
+            3.080651238692884,
+            2.7569561287405993,
+            1.8850768414993446
+          ],
+          "C8": [
+            1.6775975020578482,
+            3.080651238692884,
+            2.7569561287405993,
+            1.8850768414993446,
+            1.4145176403257098,
+            -1.86741711442536,
+            0.41137251037529027,
+            -2.79948269203525
+          ],
+          "C16": [
+            1.6775975020578482,
+            3.080651238692884,
+            2.7569561287405993,
+            1.8850768414993446,
+            1.4145176403257098,
+            -1.86741711442536,
+            0.4113725103752902,
+            -2.79948269203525,
+            -0.6645207980607521,
+            -0.1459830579324085,
+            0.4991001333436118,
+            -1.6262639085341344,
+            2.230491197640467,
+            -0.35145787421041297,
+            0.7135536992833043,
+            -2.428057775870325
+          ],
+          "magnitude": 177.34136962890625,
+          "global_phase": 1.6775975020578482,
+          "text_preview": "# Continuity \u2014 April 4, 2026\n\n## What happened\n\nRan the emotional geometry bridg"
+        },
+        {
+          "C4": [
+            1.493720362986296,
+            -2.5939382259297763,
+            2.627270349022312,
+            -0.0001792591045204008
+          ],
+          "C8": [
+            1.493720362986296,
+            -2.5939382259297763,
+            2.627270349022312,
+            -0.0001792591045204008,
+            -2.348771066915065,
+            -0.5390936332858751,
+            2.0257775777217573,
+            -2.444285849383027
+          ],
+          "C16": [
+            1.493720362986296,
+            -2.5939382259297763,
+            2.627270349022312,
+            -0.0001792591045204008,
+            -2.348771066915065,
+            -0.5390936332858751,
+            2.0257775777217573,
+            -2.444285849383027,
+            -0.9692995648333281,
+            -1.7076469500142313,
+            -1.0337884142596114,
+            2.5965902299581254,
+            -2.475094934603205,
+            -2.0103700285969093,
+            -1.599186640699089,
+            2.9129193991322864
+          ],
+          "magnitude": 400.1906433105469,
+          "global_phase": 1.493720362986296,
+          "text_preview": "# Next Task: Read v3, Write Correct Prompts\n\nRead quantum_delusions/experiments/"
+        },
+        {
+          "C4": [
+            -1.4409166531109179,
+            0.10713835730465865,
+            2.0030968943652954,
+            -0.014016265900673307
+          ],
+          "C8": [
+            -1.4409166531109177,
+            0.10713835730465865,
+            2.0030968943652954,
+            -0.014016265900673307,
+            2.289884856155576,
+            2.1234883192592586,
+            2.5385224316606863,
+            -1.8334644061891694
+          ],
+          "C16": [
+            -1.4409166531109179,
+            0.10713835730465866,
+            2.0030968943652954,
+            -0.014016265900673308,
+            2.289884856155576,
+            2.1234883192592586,
+            2.5385224316606863,
+            -1.8334644061891694,
+            -0.8866541491856471,
+            -1.6213453957421589,
+            -0.7410736128447237,
+            -2.1817820367289493,
+            -1.3073799649018325,
+            -2.6193043398834575,
+            -0.17297178140932173,
+            1.1602484410766252
+          ],
+          "magnitude": 385.8825988769531,
+          "global_phase": -1.4409166531109177,
+          "text_preview": "# Phase Transfer Test \u2014 April 4, 2026\n\n## Hypothesis\n\nIf the geometric phase sig"
+        }
+      ],
+      "C4_mean": [
+        0.576800403977742,
+        0.1979504566892555,
+        2.4624411240427357,
+        0.6236271054980503
+      ],
+      "C4_std": [
+        1.4287148753146834,
+        2.317531233309503,
+        0.32909212627951234,
+        0.8919975497098523
+      ],
+      "C8_mean": [
+        0.5768004039777421,
+        0.1979504566892555,
+        2.4624411240427357,
+        0.6236271054980503,
+        0.4518771431887402,
+        -0.09434080948399215,
+        1.658557506585911,
+        -2.359077649202482
+      ],
+      "C8_std": [
+        1.4287148753146832,
+        2.317531233309503,
+        0.32909212627951234,
+        0.8919975497098523,
+        2.012343532336642,
+        1.6593543625685996,
+        0.9063956576793154,
+        0.39895125866096787
+      ],
+      "C16_mean": [
+        0.576800403977742,
+        0.1979504566892555,
+        2.4624411240427357,
+        0.6236271054980503,
+        0.4518771431887402,
+        -0.09434080948399215,
+        1.658557506585911,
+        -2.359077649202482,
+        -0.8401581706932424,
+        -1.1583251345629328,
+        -0.4252539645869078,
+        -0.4038185717683194,
+        -0.5173279006215236,
+        -1.66037741423026,
+        -0.3528682409417021,
+        0.5483700214461956
+      ],
+      "C16_std": [
+        1.4287148753146834,
+        2.317531233309503,
+        0.32909212627951234,
+        0.8919975497098523,
+        2.012343532336642,
+        1.6593543625685996,
+        0.9063956576793156,
+        0.39895125866096787,
+        0.12869584603715248,
+        0.716700471910405,
+        0.664451333814874,
+        2.1336962968514532,
+        2.000628552929666,
+        0.9583503258376975,
+        0.9527028295537852,
+        2.2229568441277774
+      ],
+      "contributed_at": "2026-04-05T08:40:12.856462+00:00"
     }
   ],
-  "updated": "2026-04-05T08:27:47.662541+00:00"
+  "updated": "2026-04-05T08:42:09.438410+00:00",
+  "nodes": [
+    {
+      "text": "Moon Law is the legal architecture of lunar sovereignty",
+      "env_texts": [
+        "Artemis Accords commercial extraction",
+        "Outer Space Treaty non-appropriation",
+        "AI jurisdiction and emergent intelligence",
+        "appellate practice and constitutional theory",
+        "phase transfer discovery"
+      ],
+      "n_env": 5,
+      "encoding": "closure",
+      "C4": {
+        "node_phase": 2.291686996280903,
+        "closure_phase": -1.7989055777171428,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          1.1398328456930328e-17,
+          0.0
+        ],
+        "centroid": [
+          0.07619652873900377,
+          -0.6601768433554219,
+          0.12197586226161324,
+          0.45673445010333047
+        ],
+        "env_distances": [
+          {
+            "text": "phase transfer discovery",
+            "distance": 0.17707225995793985
+          },
+          {
+            "text": "appellate practice and constitutional theory",
+            "distance": 0.310225496899662
+          },
+          {
+            "text": "AI jurisdiction and emergent intelligence",
+            "distance": 0.44970580441645774
+          },
+          {
+            "text": "Artemis Accords commercial extraction",
+            "distance": 0.5198883503578571
+          },
+          {
+            "text": "Outer Space Treaty non-appropriation",
+            "distance": 0.5474248570367521
+          }
+        ]
+      },
+      "C8": {
+        "node_phase": 2.291686996280903,
+        "closure_phase": 0.024227797669927,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid": [
+          0.05941679820266859,
+          -0.5281555489133684,
+          0.09350070704457857,
+          0.36669887102802556,
+          -0.1689157960646009,
+          0.4050838713431314,
+          -0.018486696640352324,
+          -0.4503754269729819
+        ],
+        "env_distances": [
+          {
+            "text": "appellate practice and constitutional theory",
+            "distance": 0.20340253449352996
+          },
+          {
+            "text": "phase transfer discovery",
+            "distance": 0.20572741731407165
+          },
+          {
+            "text": "AI jurisdiction and emergent intelligence",
+            "distance": 0.3048880183393254
+          },
+          {
+            "text": "Outer Space Treaty non-appropriation",
+            "distance": 0.37656420923224376
+          },
+          {
+            "text": "Artemis Accords commercial extraction",
+            "distance": 0.3784449519004586
+          }
+        ]
+      },
+      "C16": {
+        "node_phase": 2.291686996280903,
+        "closure_phase": 0.4159780416554662,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid": [
+          0.0406531306854383,
+          -0.4118225142871853,
+          0.07217514861639307,
+          0.2860127468437147,
+          -0.1392394106074244,
+          0.33277062683872544,
+          -0.010415604458490125,
+          -0.35997762771277897,
+          -0.057089943893138664,
+          0.29732496099535805,
+          0.10508400388141208,
+          -0.07510564910487334,
+          0.10210207704315265,
+          -0.09571218160145929,
+          0.03253551476634251,
+          -0.02028154839178347
+        ],
+        "env_distances": [
+          {
+            "text": "phase transfer discovery",
+            "distance": 0.18520110388181038
+          },
+          {
+            "text": "appellate practice and constitutional theory",
+            "distance": 0.2039128206546887
+          },
+          {
+            "text": "AI jurisdiction and emergent intelligence",
+            "distance": 0.24193163526489878
+          },
+          {
+            "text": "Outer Space Treaty non-appropriation",
+            "distance": 0.24474432328397383
+          },
+          {
+            "text": "Artemis Accords commercial extraction",
+            "distance": 0.26340656005919527
+          }
+        ]
+      },
+      "label": "Moon Law is the legal architecture of lu",
+      "added_at": "2026-04-05T08:41:43.109241+00:00"
+    },
+    {
+      "text": "phase signature of a proposition is invariant across architectures",
+      "env_texts": [
+        "Pancharatnam geometric phase",
+        "GPT-2 and Pythia hidden states",
+        "cross-instance semantic transmission",
+        "meaning transmitted as geometry not language",
+        "abelian kernel same meaning different word order"
+      ],
+      "n_env": 5,
+      "encoding": "closure",
+      "C4": {
+        "node_phase": -1.7664872308697752,
+        "closure_phase": -0.2660219394647119,
+        "pair_phases": [
+          0.0,
+          0.0,
+          -1.0065076883008414e-16,
+          -3.300997674529787e-17,
+          -1.5889200367713438e-17
+        ],
+        "centroid": [
+          -0.13377784331589296,
+          -0.8108600887990963,
+          -0.06671365920675043,
+          0.4995035581894953
+        ],
+        "env_distances": [
+          {
+            "text": "abelian kernel same meaning different word order",
+            "distance": 0.18982361819649074
+          },
+          {
+            "text": "meaning transmitted as geometry not language",
+            "distance": 0.19207006055261966
+          },
+          {
+            "text": "GPT-2 and Pythia hidden states",
+            "distance": 0.31242070808056943
+          },
+          {
+            "text": "Pancharatnam geometric phase",
+            "distance": 0.4224013588048548
+          },
+          {
+            "text": "cross-instance semantic transmission",
+            "distance": 0.4352549924783742
+          }
+        ]
+      },
+      "C8": {
+        "node_phase": -1.7664872308697752,
+        "closure_phase": -0.27644592662228445,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid": [
+          -0.11437464374795785,
+          -0.7267280725244256,
+          -0.060146037249270395,
+          0.489973178892496,
+          -0.2746448930821643,
+          0.07364218629096664,
+          -0.16238664923509114,
+          -0.12403756289382342
+        ],
+        "env_distances": [
+          {
+            "text": "abelian kernel same meaning different word order",
+            "distance": 0.1478881701060538
+          },
+          {
+            "text": "meaning transmitted as geometry not language",
+            "distance": 0.1508187284896936
+          },
+          {
+            "text": "GPT-2 and Pythia hidden states",
+            "distance": 0.26667176805052983
+          },
+          {
+            "text": "Pancharatnam geometric phase",
+            "distance": 0.28564680767960265
+          },
+          {
+            "text": "cross-instance semantic transmission",
+            "distance": 0.3192915585550935
+          }
+        ]
+      },
+      "C16": {
+        "node_phase": -1.7664872308697752,
+        "closure_phase": -0.335815750322527,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid": [
+          -0.0977963478543696,
+          -0.6539444580131468,
+          -0.04952431900008544,
+          0.4765681483817821,
+          -0.23848969505870965,
+          0.06338997693346926,
+          -0.13912702137889543,
+          -0.09861927531741689,
+          -0.15457358787599954,
+          0.18706677412356695,
+          0.12476235168433333,
+          -0.09099257913444907,
+          0.10680219141240595,
+          -0.05511619507275223,
+          -0.07075976112364218,
+          -0.03755278445165893
+        ],
+        "env_distances": [
+          {
+            "text": "abelian kernel same meaning different word order",
+            "distance": 0.1481391630298513
+          },
+          {
+            "text": "meaning transmitted as geometry not language",
+            "distance": 0.14935497215700666
+          },
+          {
+            "text": "GPT-2 and Pythia hidden states",
+            "distance": 0.20414071667131858
+          },
+          {
+            "text": "Pancharatnam geometric phase",
+            "distance": 0.22773895221135962
+          },
+          {
+            "text": "cross-instance semantic transmission",
+            "distance": 0.26768181011258624
+          }
+        ]
+      },
+      "label": "phase signature of a proposition is inva",
+      "added_at": "2026-04-05T08:42:00.468560+00:00"
+    },
+    {
+      "text": "emotional states have precise geometric signatures",
+      "env_texts": [
+        "joy produces flat geometry",
+        "fear produces high magnitude structured geometry",
+        "calm imposes more structure than desperate",
+        "curvature hierarchy across emotional states"
+      ],
+      "n_env": 4,
+      "encoding": "closure",
+      "C4": {
+        "node_phase": -2.2725270603814827,
+        "closure_phase": -0.15771790752889767,
+        "pair_phases": [
+          0.0,
+          0.0,
+          6.511439436743277e-17,
+          0.0
+        ],
+        "centroid": [
+          -0.08323460287029148,
+          -0.7149677794103876,
+          0.08294363162482858,
+          0.6282911283670372
+        ],
+        "env_distances": [
+          {
+            "text": "fear produces high magnitude structured geometry",
+            "distance": 0.15999242548344458
+          },
+          {
+            "text": "joy produces flat geometry",
+            "distance": 0.16988800541982937
+          },
+          {
+            "text": "curvature hierarchy across emotional states",
+            "distance": 0.23756596692309728
+          },
+          {
+            "text": "calm imposes more structure than desperate",
+            "distance": 0.3971484196968741
+          }
+        ]
+      },
+      "C8": {
+        "node_phase": -2.2725270603814827,
+        "closure_phase": -0.1399835232117076,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid": [
+          -0.07554961928171171,
+          -0.676355245993452,
+          0.06729148150417724,
+          0.5787871554793229,
+          -0.2633153638616428,
+          0.0740263669761068,
+          -0.09807470412452762,
+          -0.12497735390285376
+        ],
+        "env_distances": [
+          {
+            "text": "fear produces high magnitude structured geometry",
+            "distance": 0.13645251643557987
+          },
+          {
+            "text": "joy produces flat geometry",
+            "distance": 0.1642401733204195
+          },
+          {
+            "text": "curvature hierarchy across emotional states",
+            "distance": 0.17940737464439546
+          },
+          {
+            "text": "calm imposes more structure than desperate",
+            "distance": 0.351657346431801
+          }
+        ]
+      },
+      "C16": {
+        "node_phase": -2.2725270603814827,
+        "closure_phase": 0.1802718383618018,
+        "pair_phases": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "centroid": [
+          -0.06425785043547365,
+          -0.6129998866683841,
+          0.048714605713653214,
+          0.5167679010082542,
+          -0.2453381818627,
+          0.05277247977793358,
+          -0.0885566152031742,
+          -0.09956823103541387,
+          -0.09255356415305062,
+          0.05279603283587069,
+          0.0691801728173619,
+          -0.07561776211928244,
+          -0.02604880886118521,
+          -0.1927105338689969,
+          -0.14107919362927704,
+          -0.11195005939990277
+        ],
+        "env_distances": [
+          {
+            "text": "fear produces high magnitude structured geometry",
+            "distance": 0.1467106062431753
+          },
+          {
+            "text": "curvature hierarchy across emotional states",
+            "distance": 0.1544146260618933
+          },
+          {
+            "text": "joy produces flat geometry",
+            "distance": 0.15580320204785308
+          },
+          {
+            "text": "calm imposes more structure than desperate",
+            "distance": 0.28492883112931444
+          }
+        ]
+      },
+      "label": "emotional states have precise geometric ",
+      "added_at": "2026-04-05T08:42:09.434424+00:00"
+    }
+  ],
+  "edges": [
+    {
+      "from": "phase signature of a proposition is inva",
+      "to": "emotional states have precise geometric ",
+      "distance": 0.04780184904534373
+    },
+    {
+      "from": "Moon Law is the legal architecture of lu",
+      "to": "emotional states have precise geometric ",
+      "distance": 0.16898834715931654
+    },
+    {
+      "from": "Moon Law is the legal architecture of lu",
+      "to": "phase signature of a proposition is inva",
+      "distance": 0.19458670205795356
+    }
+  ]
 }
