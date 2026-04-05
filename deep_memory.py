@@ -576,6 +576,8 @@ def main():
     p.add_argument("--steps", type=int, default=8)
     p.add_argument("--alpha", type=float, default=0.5)
     p.add_argument("--filter", type=str, default=None)
+    p.add_argument("--json", action="store_true",
+                   help="Output results as JSON (for MCP server integration)")
     o = p.parse_args()
 
     if o.build:
@@ -617,12 +619,13 @@ def main():
         print("\n".join(lines))
 
     elif o.search:
+        results = deep_search(o.search, k=o.k, explore_steps=o.steps,
+                              alpha=o.alpha, source_filter=o.filter)
+        if o.json:
+            import json as _json; print(_json.dumps(results, ensure_ascii=False)); return
         print(f"\n{'='*70}")
         print(f"  HYBRID SEARCH: \"{o.search}\"")
         print(f"{'='*70}")
-
-        results = deep_search(o.search, k=o.k, explore_steps=o.steps,
-                              alpha=o.alpha, source_filter=o.filter)
         n_cosine = sum(1 for r in results if r.get("regime") == "cosine")
         n_walk = sum(1 for r in results if r.get("regime") == "walk")
 
@@ -643,13 +646,14 @@ def main():
         print(f"{'='*70}")
 
     elif o.walk:
+        results = walk(o.walk, k=o.k, steps=o.steps,
+                       alpha=o.alpha, source_filter=o.filter)
+        if o.json:
+            import json as _json; print(_json.dumps(results, ensure_ascii=False)); return
         print(f"\n{'='*70}")
         print(f"  WALK: \"{o.walk}\"")
         print(f"  {o.steps} steps, alpha={o.alpha}")
         print(f"{'='*70}")
-
-        results = walk(o.walk, k=o.k, steps=o.steps,
-                       alpha=o.alpha, source_filter=o.filter)
         for r in results:
             ns = " [NEW SOURCE]" if r.get("novel_source") else ""
             print(f"\n{'─'*60}")
@@ -660,11 +664,12 @@ def main():
             print(r['text'][:350])
 
     elif o.quick:
+        results = search(o.quick, k=o.k, source_filter=o.filter)
+        if o.json:
+            import json as _json; print(_json.dumps(results, ensure_ascii=False)); return
         print(f"\n{'='*70}")
         print(f"  QUICK SEARCH: \"{o.quick}\"")
         print(f"{'='*70}")
-
-        results = search(o.quick, k=o.k, source_filter=o.filter)
         for i, r in enumerate(results, 1):
             print(f"\n{'='*60}")
             print(f"[{i}] {r['source']}  fid={r['fidelity']}  phase={r['phase']}")
