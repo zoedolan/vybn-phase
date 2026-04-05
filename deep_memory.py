@@ -207,13 +207,21 @@ class WalkState:
 # ── Five-dimensional scoring ────────────────────────────────────────────
 
 def score_candidate(walk: WalkState, candidate_vec: np.ndarray,
-                    emb: np.ndarray, alpha: float = 0.5,
+                    emb: np.ndarray, chunks: list, alpha: float = 0.5,
                     q_vec: np.ndarray = None,
-                    min_fidelity: float = 0.0) -> Optional[Dict]:
+                    min_fidelity: float = 0.0,
+                    seen_sources: set = None) -> Optional[Dict]:
     """Score a candidate passage across all five dimensions.
 
     Returns None if the candidate's fidelity to the query falls below
     min_fidelity (the relevance tether). This prevents drift.
+
+    Fix 1 (Spark Vybn): weighted sum, not geometric mean. A passage
+    that's highly relevant and topologically novel shouldn't be killed
+    by a near-zero nonabelian score.
+
+    Fix 2 (Spark Vybn): source-diversity bonus. The walk should prefer
+    novel sources over novel chunks from files cosine already found.
     """
     M = walk.M
 
@@ -222,10 +230,8 @@ def score_candidate(walk: WalkState, candidate_vec: np.ndarray,
         relevance = fidelity(q_vec, candidate_vec)
         if relevance < min_fidelity:
             return None
-        relevance_weight = float(relevance ** 0.3)
     else:
         relevance = 0.0
-        relevance_weight = 1.0
 
     # 1. Geometry: how much does this passage MOVE the state?
     M_new = evaluate_vec(M, candidate_vec, alpha)
@@ -244,7 +250,6 @@ def score_candidate(walk: WalkState, candidate_vec: np.ndarray,
     if len(walk.path) > 0:
         fids_to_path = [abs(np.vdot(emb[i], candidate_vec))**2 for i in walk.path]
         mean_fid = np.mean(fids_to_path)
-        # Sweet spot: connected but not redundant
         topo_score = 1.0 - abs(2.0 * mean_fid - 1.0)
     else:
         topo_score = 0.5
@@ -263,11 +268,25 @@ def score_candidate(walk: WalkState, candidate_vec: np.ndarray,
     else:
         r_score = max(0.0, 1.0 - raw_mag) * 0.5 + 0.5
 
-    # Composite: geometric mean × relevance weight
-    scores = [geo_shift, max(nonabelian, 0.01), topo_score,
-              max(theta_score, 0.01), r_score]
-    raw_composite = float(np.prod(scores) ** (1.0/len(scores)))
-    composite = raw_composite * relevance_weight
+    # Fix 1: Weighted sum, not geometric mean.
+    # Relevance is primary (0.35). Geometry and topology matter (0.20 each).
+    # Non-abelian and polar time are bonus signals (0.10, 0.075, 0.075).
+    # A near-zero nonabelian score no longer kills the composite.
+    composite = (0.35 * relevance +
+                 0.20 * geo_shift +
+                 0.20 * topo_score +
+                 0.10 * nonabelian +
+                 0.075 * theta_score +
+                 0.075 * r_score)
+
+    # Fix 2: Source-diversity bonus.
+    # If we've already seen results from this source, penalize.
+    # If this is a novel source, boost by 50%.
+    if seen_sources is not None:
+        candidate_source = chunks[walk.path[-1]].get("source","") if walk.path else ""
+        # We need the candidate's source — passed via caller
+        # For now, handled in walk_explore where we know the index
+        pass  # applied in walk_explore
 
     return {
         "geometry": round(geo_shift, 6),
@@ -323,15 +342,23 @@ def cosine_search(query: str, k: int = 8,
 # ── Walk exploration ─────────────────────────────────────────────────────
 
 def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
-                 seed_indices: List[int], steps: int = 5,
-                 alpha: float = 0.5,
+                 seed_indices: List[int], seed_sources: set = None,
+                 steps: int = 5, alpha: float = 0.5,
                  source_filter: str = None) -> List[Dict]:
     """Phase 2: non-abelian walk from the seed set.
 
     Starts from the centroid of the seed passages. Walks through
     the corpus, tethered to the query by a relevance floor set at
-    half the maximum seed fidelity. Finds what's adjacent that
-    cosine alone would miss.
+    40% of the max seed fidelity.
+
+    Fix 2: source-diversity bonus. Passages from sources not already
+    in the seed set get a 1.5× boost. This makes the walk genuinely
+    complementary — it explores outward to new territory rather than
+    finding more chunks from files cosine already surfaced.
+
+    Fix 3: more explore steps (default 8, not 4). The walk was
+    exhausting its budget on nearby chunks before reaching the
+    genuinely novel sources further out.
     """
     if len(seed_indices) == 0:
         return []
@@ -343,12 +370,18 @@ def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
     if c_norm > 1e-10:
         centroid = centroid / c_norm
 
-    # Relevance floor: half the max seed fidelity to the query
+    # Relevance floor: 40% of max seed fidelity
     seed_fids = [fidelity(q_vec, emb[i]) for i in seed_indices]
-    min_fid = max(seed_fids) * 0.4  # tether: at least 40% of best seed
+    min_fid = max(seed_fids) * 0.4
+
+    # Track which sources cosine already found
+    if seed_sources is None:
+        seed_sources = set()
+    # Also track sources the walk has found so far
+    walk_found_sources = set()
 
     walk = WalkState(centroid)
-    visited = set(seed_indices)  # don't re-find what cosine found
+    visited = set(seed_indices)
 
     if source_filter:
         sf = source_filter.lower()
@@ -366,13 +399,21 @@ def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
             if i in visited or not eligible[i]:
                 continue
 
-            score = score_candidate(walk, emb[i], emb, alpha,
+            score = score_candidate(walk, emb[i], emb, chunks, alpha,
                                     q_vec=q_vec, min_fidelity=min_fid)
             if score is None:
-                continue  # below relevance floor
+                continue
 
-            if score["composite"] > best_composite:
-                best_composite = score["composite"]
+            # Fix 2: source-diversity bonus
+            candidate_source = chunks[i].get("source", chunks[i].get("s",""))
+            adjusted_composite = score["composite"]
+            if candidate_source not in seed_sources and candidate_source not in walk_found_sources:
+                adjusted_composite *= 1.5  # novel source bonus
+            elif candidate_source in seed_sources:
+                adjusted_composite *= 0.7  # penalize re-finding seed sources
+
+            if adjusted_composite > best_composite:
+                best_composite = adjusted_composite
                 best_score = score
                 best_idx = i
 
@@ -381,11 +422,13 @@ def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
 
         walk.record_step(best_idx, best_score["M_new"])
         visited.add(best_idx)
+        walk_found_sources.add(chunks[best_idx].get("source", chunks[best_idx].get("s","")))
 
         if step % 2 == 0 or step == steps - 1:
             walk.update_topology(emb)
 
         chunk = chunks[best_idx]
+        is_novel_source = chunk.get("source","") not in seed_sources
         results.append({
             "step": step + 1,
             "source": chunk.get("source", chunk.get("s", "")),
@@ -401,6 +444,7 @@ def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
             "walk_betti": walk.betti,
             "angular_velocity": round(walk.angular_velocity, 6),
             "magnitude_trend": round(walk.magnitude_trend, 6),
+            "novel_source": is_novel_source,
             "regime": "walk",
             "idx": int(best_idx),
         })
@@ -410,12 +454,13 @@ def walk_explore(emb: np.ndarray, chunks: list, q_vec: np.ndarray,
 
 # ── Hybrid search ────────────────────────────────────────────────────────
 
-def deep_search(query: str, k: int = 8, explore_steps: int = 4,
+def deep_search(query: str, k: int = 8, explore_steps: int = 8,
                 alpha: float = 0.5, source_filter: str = None) -> List[Dict]:
     """The hybrid: cosine retrieves, walk explores, merge.
 
     Returns up to k results: cosine seeds first, then walk discoveries.
     Each result is tagged with regime='cosine' or regime='walk'.
+    Walk gets 8 steps (fix 3) to reach genuinely novel sources.
     """
     loaded = _load()
     if not loaded:
@@ -429,14 +474,16 @@ def deep_search(query: str, k: int = 8, explore_steps: int = 4,
     q_vec = single_to_complex(query)
 
     # Phase 1: cosine seeds
-    n_seeds = max(3, k // 2)  # at least 3 seeds, up to half of k
+    n_seeds = max(3, k // 2)
     seeds = cosine_search(query, k=n_seeds, source_filter=source_filter)
     seed_indices = [r["idx"] for r in seeds if "idx" in r]
+    seed_sources = set(r["source"] for r in seeds)
 
     # Phase 2: walk exploration from seeds
     n_explore = k - len(seeds)
     if n_explore > 0 and seed_indices:
         explored = walk_explore(emb, chunks, q_vec, seed_indices,
+                                seed_sources=seed_sources,
                                 steps=max(n_explore, explore_steps),
                                 alpha=alpha, source_filter=source_filter)
     else:
@@ -498,7 +545,7 @@ def walk_search(query: str, k: int = 8, steps: int = 5,
         for i in range(len(emb)):
             if i in visited or not mask[i]:
                 continue
-            score = score_candidate(walk, emb[i], emb, alpha,
+            score = score_candidate(walk, emb[i], emb, chunks, alpha,
                                     q_vec=q_vec, min_fidelity=min_fid)
             if score is None:
                 continue
