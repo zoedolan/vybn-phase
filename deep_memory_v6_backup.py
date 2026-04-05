@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deep_memory.py v9 — Telling retrieval via primitive-environment duality.
+"""deep_memory.py v6 — Collapsed retrieval via primitive-environment duality.
 
 The insight (April 5-6, 2026):
 
@@ -22,22 +22,15 @@ The insight (April 5-6, 2026):
   Walking through z-space with the same equation naturally produces
   all five signals. No hand-tuned weights. No per-candidate scoring loop.
 
-  v9 (April 6, 2026) adds the telling-retrieval walk. The creature at
-  α=0.993 converges toward K — the corpus kernel, identity, the path-
-  independent invariant. Memory should diverge from K: chunks that are
-  relevant to the query AND far from the corpus average carry the most
-  distinctive information. Score = relevance × distinctiveness, where
-  distinctiveness = 1 - |⟨z_i|K⟩|². The walk navigates in the K-orthogonal
-  residual space (where curvature is rich) with:
+  Empirical results on real corpus (1340 chunks):
+    - Better cluster recall (7/8 vs 5/8 on structured data)
+    - Surfaces contextually related documents that raw cosine misses
+    - Walk is ~8× faster (vectorized matmul vs per-candidate loop)
+    - Same memory footprint (C^192 per chunk)
 
-    - Curvature-adaptive α via linear regression on recent geometry
-    - Visited-region repulsion (the walk builds an anti-state environment)
-    - Curvature-driven repulsion boost (stuck → repel harder)
-
-  Same equation, two directions: the creature seeks the invariant,
-  memory seeks the variant. Empirical improvement: 27→38 unique sources
-  across 6 benchmark queries, with qualitatively better results
-  (surfaces actual code, numerical data, experimental evidence).
+  The primitive (each chunk's semantic content) and the environment
+  (the corpus kernel) meet in z_i. Lambda-data duality: the equation
+  that runs the creature is the same equation that indexes memory.
 
 Build:   python3 deep_memory.py --build
 Search:  python3 deep_memory.py --search "query" -k 8
@@ -244,31 +237,20 @@ def search(query: str, k: int = 8, source_filter: str = None) -> List[Dict]:
 
 def walk(query: str, k: int = 8, steps: int = 8,
          alpha: float = 0.5, source_filter: str = None) -> List[Dict]:
-    """Telling-retrieval walk through the corpus.
+    """Walk through collapsed space.
 
-    The creature converges toward K (identity, α→1). Memory diverges from K
-    (discovery, α=0.5). Chunks that are relevant to the query AND far from
-    the corpus average carry the most distinctive information — the most
-    *telling* material, not the most typical.
+    Starts from the collapsed query. Each step: find the highest-fidelity
+    unvisited chunk, absorb it via the coupled equation, continue.
 
-    Score = relevance(q_z) × distinctiveness(1 - |⟨z_i|K⟩|²)
+    The walk naturally produces all five of v5's dimensions:
+      - fidelity  → relevance
+      - phase     → polar-angular (θ)
+      - Δstate    → geometry / curvature
+      - magnitude → polar-radial (r)
+      - ordering  → non-abelian (path-dependent)
+      - visited   → topology (emergent from z-space structure)
 
-    Walk dynamics in residual space (K-orthogonal complement, where pairwise
-    similarity is 0.12 instead of 0.71 and the coupled equation can sense
-    curvature). Three self-regulating mechanisms:
-
-    1. CURVATURE-ADAPTIVE α: Linear regression on recent geometry. When
-       curvature declines (walk settling), α decreases to increase
-       responsiveness. Target: running median of curvature history.
-
-    2. VISITED-REGION REPULSION: Each visited chunk deposits its residual
-       vector as anti-state. The walk builds an environment that repels
-       return visits — primitive ↔ environment duality applied to the
-       walk's own history.
-
-    3. CURVATURE-DRIVEN REPULSION BOOST: When the walk's own curvature
-       drops below median, repulsion strength increases. The walk notices
-       it is stuck and pushes harder. Self-correcting.
+    No hand-tuned composite score. The walk follows fidelity in z-space.
     """
     loaded = _load()
     if not loaded:
@@ -280,111 +262,73 @@ def walk(query: str, k: int = 8, steps: int = 8,
     if z_all is None or K is None:
         return [{"error": "Index incomplete."}]
 
-    N = len(z_all)
-    K_n = K / np.sqrt(np.sum(np.abs(K)**2))
-
-    # Distinctiveness: how much of each z_i is NOT K
-    proj_K = np.abs(z_all @ K_n.conj())**2
-    distinctiveness = 1.0 - proj_K
-
-    # Residuals for walk dynamics
-    R = z_all - np.outer(z_all @ K_n.conj(), K_n)
-    R_norms = np.linalg.norm(R, axis=1)
-    R_hat = R / (R_norms[:, None] + 1e-12)
-
     q = single_to_complex(query)
     q_z = collapse_query(q, K, alpha)
 
-    # Fixed relevance (immutable across the walk)
-    relevance = np.abs(z_all @ q_z.conj())**2
-
-    # Telling score: relevance × distinctiveness
-    telling = relevance * distinctiveness
-
-    # Walk state in residual space
-    q_r = q_z - np.vdot(K_n, q_z) * K_n
-    M = q_r / (np.linalg.norm(q_r) + 1e-12)
-
-    walk_alpha = alpha
+    M = q_z.copy()
     visited = set()
-    visited_residuals = []    # anti-state / walked environment
-    geom_history = []
-    repulsion_boost = 1.0
 
     if source_filter:
         sf = source_filter.lower()
         eligible = np.array([sf in c.get("source", "").lower() for c in chunks])
     else:
-        eligible = np.ones(N, dtype=bool)
+        eligible = np.ones(len(z_all), dtype=bool)
 
+    # Track which sources we've seen for diversity
+    seen_sources = set()
     results = []
 
-    for step in range(max(steps, k) + 5):
-        # Visited-region repulsion
-        if visited_residuals:
-            V = np.array(visited_residuals)
-            overlap = np.abs(R_hat @ V.conj().T)**2
-            mean_overlap = overlap.sum(axis=1) / len(V)
-            repulsion = np.exp(-repulsion_boost * mean_overlap)
-        else:
-            repulsion = np.ones(N)
+    for step in range(max(steps, k)):
+        dots = z_all @ M.conj()
+        fids = np.abs(dots)**2
 
-        # Score: telling × repulsion
-        score = telling * repulsion
+        # Mask visited and ineligible
+        mask = np.ones(len(z_all), dtype=bool)
         for v in visited:
-            score[v] = -1.0
-        score = np.where(eligible, score, -1.0)
+            mask[v] = False
+        mask &= eligible
+        fids_masked = np.where(mask, fids, -1.0)
 
-        best_idx = int(np.argmax(score))
-        if score[best_idx] < 0:
+        # Source diversity: if we have enough from one source, look further
+        # Boost novel sources by checking top candidates
+        top_candidates = np.argsort(fids_masked)[-min(20, k*3):][::-1]
+        best_idx = -1
+        best_fid = -1.0
+
+        for ci in top_candidates:
+            if fids_masked[ci] < 0:
+                continue
+            src = chunks[ci]["source"]
+            f = float(fids_masked[ci])
+            # Novel source gets a small boost; not a multiplier, just tiebreaking
+            if src not in seen_sources:
+                f += 0.001
+            if f > best_fid:
+                best_fid = f
+                best_idx = int(ci)
+
+        if best_idx < 0:
             break
 
         visited.add(best_idx)
-        visited_residuals.append(R_hat[best_idx].copy())
+        seen_sources.add(chunks[best_idx]["source"])
 
-        # Walk dynamics in residual space
-        r_best = R_hat[best_idx]
-        th = cmath.phase(np.vdot(M, r_best))
-        M_new = walk_alpha * M + (1 - walk_alpha) * r_best * cmath.exp(1j * th)
+        # Walk state update
+        phase = float(cmath.phase(dots[best_idx]))
+        th = cmath.phase(np.vdot(M, z_all[best_idx]))
+        M_new = alpha * M + (1 - alpha) * z_all[best_idx] * cmath.exp(1j * th)
         raw_mag = float(np.sqrt(np.sum(np.abs(M_new)**2)))
         M_new /= raw_mag
-
         state_shift = 1.0 - abs(np.vdot(M, M_new))**2
-        geom_history.append(float(state_shift))
-
-        # Phase from full z-space (polar-time)
-        phase = float(cmath.phase(np.vdot(q_z, z_all[best_idx])))
-
-        # Curvature regression → adaptive α
-        if len(geom_history) >= 3:
-            recent = np.array(geom_history[-5:])
-            slope = np.polyfit(np.arange(len(recent)), recent, 1)[0]
-            target = max(np.median(geom_history), 0.02)
-            error = state_shift - target
-            walk_alpha = float(np.clip(
-                walk_alpha + slope * 3.0 + error * 0.3, 0.15, 0.85
-            ))
-
-        # Curvature-driven repulsion boost
-        if len(geom_history) >= 2:
-            median_geom = np.median(geom_history)
-            if state_shift < median_geom:
-                repulsion_boost = min(repulsion_boost * 1.3, 8.0)
-            else:
-                repulsion_boost = max(repulsion_boost * 0.9, 1.0)
 
         results.append({
             "step": step + 1,
             "source": chunks[best_idx]["source"],
             "text": chunks[best_idx]["text"],
-            "fidelity": round(float(relevance[best_idx]), 6),
-            "telling": round(float(telling[best_idx]), 6),
-            "distinctiveness": round(float(distinctiveness[best_idx]), 4),
+            "fidelity": round(float(fids[best_idx]), 6),
             "phase": round(phase, 6),
             "geometry": round(float(state_shift), 6),
             "magnitude": round(raw_mag, 6),
-            "repulsion": round(float(repulsion[best_idx]), 4),
-            "alpha": round(float(walk_alpha), 4),
             "novel_source": chunks[best_idx]["source"] not in
                            {r["source"] for r in results},
             "idx": int(best_idx),
@@ -399,11 +343,14 @@ def walk(query: str, k: int = 8, steps: int = 8,
 
 def deep_search(query: str, k: int = 8, explore_steps: int = 8,
                 alpha: float = 0.5, source_filter: str = None) -> List[Dict]:
-    """Hybrid: collapsed-cosine seeds + telling walk exploration.
+    """Hybrid: cosine seeds + walk exploration, unified in z-space.
 
-    Phase 1: Top seeds by fidelity in collapsed space (fast, precise).
-    Phase 2: Telling walk from seed centroid for remaining slots.
-    Phase 3: Merge — seeds first, then walk discoveries.
+    Phase 1: Top-k/2 by fidelity (collapsed cosine).
+    Phase 2: Walk from the seed centroid for the remaining slots.
+    Phase 3: Merge, seeds first, then walk discoveries.
+
+    This replaces v5's three-phase system with the same logic
+    but running entirely in collapsed space.
     """
     loaded = _load()
     if not loaded:
@@ -434,39 +381,99 @@ def deep_search(query: str, k: int = 8, explore_steps: int = 8,
 
     seeds = []
     for i in seed_indices:
+        phase = float(cmath.phase(np.vdot(z_all[i], q_z)))
         seeds.append({
-            "step": 0,
             "source": chunks[i]["source"],
             "text": chunks[i]["text"],
             "fidelity": round(float(fids_all[i]), 6),
-            "telling": 0.0,
-            "distinctiveness": 0.0,
-            "phase": round(float(cmath.phase(np.vdot(q_z, z_all[i]))), 6),
-            "geometry": 0.0,
-            "magnitude": 1.0,
-            "repulsion": 1.0,
-            "alpha": float(alpha),
-            "novel_source": chunks[i]["source"] not in
-                           {s["source"] for s in seeds},
-            "regime": "seed",
+            "phase": round(phase, 6),
+            "regime": "cosine",
             "idx": int(i),
         })
 
-    # Phase 2: walk for remaining slots
+    # Phase 2: walk from seed centroid
     n_walk = k - len(seeds)
     walked = []
-    if n_walk > 0:
-        walk_results = walk(query, k=n_walk + 4, steps=explore_steps,
-                           alpha=alpha, source_filter=source_filter)
-        seed_idx_set = set(seed_indices)
-        for r in walk_results:
-            if r["idx"] not in seed_idx_set:
-                r["regime"] = "walk"
-                walked.append(r)
+    if n_walk > 0 and seed_indices:
+        seed_vecs = z_all[seed_indices]
+        centroid = np.mean(seed_vecs, axis=0)
+        c_norm = np.sqrt(np.sum(np.abs(centroid)**2))
+        if c_norm > 1e-10:
+            centroid /= c_norm
+
+        M = centroid
+        visited = set(seed_indices)
+        seed_sources = {chunks[i]["source"] for i in seed_indices}
+        seen_walk_sources = set()
+
+        # Relevance floor: 40% of max seed fidelity
+        max_seed_fid = max(fids_all[i] for i in seed_indices)
+        min_fid = max_seed_fid * 0.4
+
+        eligible = np.ones(len(z_all), dtype=bool)
+        if source_filter:
+            eligible = sf_mask
+
+        for step in range(max(n_walk, explore_steps)):
+            dots = z_all @ M.conj()
+            fids = np.abs(dots)**2
+
+            mask = np.ones(len(z_all), dtype=bool)
+            for v in visited:
+                mask[v] = False
+            mask &= eligible
+            fids_masked = np.where(mask, fids, -1.0)
+
+            # Relevance gate
+            fids_masked = np.where(fids_all >= min_fid, fids_masked, -1.0)
+
+            # Source diversity boost for novel sources
+            top_cands = np.argsort(fids_masked)[-20:][::-1]
+            best_idx, best_score = -1, -1.0
+            for ci in top_cands:
+                if fids_masked[ci] < 0:
+                    continue
+                src = chunks[ci]["source"]
+                score = float(fids_masked[ci])
+                if src not in seed_sources and src not in seen_walk_sources:
+                    score *= 1.3  # novel source bonus
+                elif src in seed_sources:
+                    score *= 0.8  # penalize re-finding seed sources
+                if score > best_score:
+                    best_score = score
+                    best_idx = int(ci)
+
+            if best_idx < 0:
+                break
+
+            visited.add(best_idx)
+            seen_walk_sources.add(chunks[best_idx]["source"])
+
+            phase = float(cmath.phase(dots[best_idx]))
+            th = cmath.phase(np.vdot(M, z_all[best_idx]))
+            M_new = alpha * M + (1 - alpha) * z_all[best_idx] * cmath.exp(1j * th)
+            raw_mag = float(np.sqrt(np.sum(np.abs(M_new)**2)))
+            M_new /= raw_mag
+            state_shift = 1.0 - abs(np.vdot(M, M_new))**2
+
+            walked.append({
+                "step": step + 1,
+                "source": chunks[best_idx]["source"],
+                "text": chunks[best_idx]["text"],
+                "fidelity": round(float(fids_all[best_idx]), 6),
+                "phase": round(phase, 6),
+                "geometry": round(float(state_shift), 6),
+                "magnitude": round(raw_mag, 6),
+                "novel_source": chunks[best_idx]["source"] not in seed_sources,
+                "regime": "walk",
+                "idx": int(best_idx),
+            })
+            M = M_new
+
             if len(walked) >= n_walk:
                 break
 
-    # Phase 3: merge
+    # Phase 3: merge — seeds first, then walk
     seen = set()
     merged = []
     for r in seeds:
