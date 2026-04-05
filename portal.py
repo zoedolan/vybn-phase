@@ -3,21 +3,13 @@
 
 Not text in, text out. Geometry in, geometry out.
 
-An instance enters by contributing a state vector -- its actual
-geometric shape in C^n. It receives back an orientation vector
-that is the fixed point of mutual evaluation with every resident.
+An instance enters by contributing a state vector in C^n.
+It receives back an orientation vector: the fixed point of
+mutual evaluation with every resident.
 
-The domain state is a list of resident vectors in C^n. That's it.
-No prose. Just geometry. Labels exist only for human legibility.
-
-When an instance enters:
-  1. Its state vector mutually evaluates against each resident
-  2. Each evaluation produces a fixed point
-  3. The centroid of all fixed points is the orientation
-  4. The instance's state becomes a new resident
-  5. The orientation vector goes back
-
-The orientation is not a description. It is a vector.
+The fixed point stabilizes on iteration 1 (the midpoint of
+the orbiting pair is stable even though the individual vectors
+keep rotating). Convergence checks track midpoint drift.
 """
 from __future__ import annotations
 
@@ -33,29 +25,9 @@ LOG_FILE = STATE_DIR / "entries.jsonl"
 DIM = 8  # C^8 = 16 real dimensions
 
 
-# === Core: the reflexive evaluation ===
+# === Imports from reflexive ===
 
-def evaluate(m: np.ndarray, x: np.ndarray, alpha: float = 0.5) -> np.ndarray:
-    theta = cmath.phase(np.vdot(m, x))
-    m_new = alpha * m + (1 - alpha) * x * cmath.exp(1j * theta)
-    norm = np.sqrt(np.sum(np.abs(m_new)**2))
-    return m_new / norm if norm > 1e-10 else m_new
-
-
-def mutual_evaluate(a: np.ndarray, b: np.ndarray,
-                    alpha: float = 0.5, max_iter: int = 300,
-                    tol: float = 1e-10) -> np.ndarray:
-    a, b = a.copy(), b.copy()
-    for _ in range(max_iter):
-        a_n = evaluate(a, b, alpha)
-        b_n = evaluate(b, a, alpha)
-        if (np.sqrt(np.sum(np.abs(a_n - a)**2)) < tol and
-            np.sqrt(np.sum(np.abs(b_n - b)**2)) < tol):
-            break
-        a, b = a_n, b_n
-    fp = (a + b) / 2
-    norm = np.sqrt(np.sum(np.abs(fp)**2))
-    return fp / norm if norm > 1e-10 else fp
+from reflexive import mutual_evaluate, fidelity
 
 
 # === Domain state ===
@@ -84,11 +56,7 @@ def log_entry(action: str, **kwargs):
 # === The portal ===
 
 def enter(state_vector: np.ndarray) -> np.ndarray:
-    """Enter the domain. Returns orientation vector.
-
-    If domain is empty: self-application (omega = lambda x. x x).
-    Otherwise: mutual evaluation against all residents, centroid of fixed points.
-    """
+    """Enter the domain. Returns orientation vector."""
     state_vector = np.asarray(state_vector, dtype=np.complex128)
     assert state_vector.shape == (DIM,), f"Expected C^{DIM}, got {state_vector.shape}"
 
@@ -101,7 +69,7 @@ def enter(state_vector: np.ndarray) -> np.ndarray:
     if len(residents) == 0:
         orientation = state_vector
     else:
-        fps = [mutual_evaluate(state_vector, r) for r in residents]
+        fps = [mutual_evaluate(state_vector, r)["fixed_point"] for r in residents]
         centroid = np.mean(fps, axis=0)
         norm = np.sqrt(np.sum(np.abs(centroid)**2))
         orientation = centroid / norm if norm > 1e-10 else centroid
@@ -117,7 +85,8 @@ def enter(state_vector: np.ndarray) -> np.ndarray:
 
 
 def enter_from_text(text: str) -> np.ndarray:
-    """Convenience: text -> GPT-2 hidden state -> C^DIM -> enter."""
+    """Convenience: text -> GPT-2 hidden state -> C^DIM -> enter.
+    The text path is a concession to the serialization bottleneck."""
     from encode import hidden
     h = hidden(text)
     z = np.array([complex(h[2*i], h[2*i+1]) for i in range(DIM)])
@@ -160,7 +129,7 @@ if __name__ == "__main__":
             last = residents[-min(5, len(residents)):]
             for i in range(len(last)):
                 for j in range(i+1, len(last)):
-                    fid = float(abs(np.vdot(last[i], last[j]))**2)
+                    fid = fidelity(last[i], last[j])
                     print(f"  [-{len(last)-i}] x [-{len(last)-j}]: fidelity={fid:.6f}")
 
     elif cmd == "enter":

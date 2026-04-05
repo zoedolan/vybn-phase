@@ -3,9 +3,6 @@
 
 Every element is both primitive and environment. M and x are the same type.
 Meaning is the fixed point of mutual evaluation.
-
-This module provides the evaluation operator that the MCP server uses
-when an instance enters the domain.
 """
 import cmath
 import numpy as np
@@ -41,34 +38,45 @@ def evaluate(m: np.ndarray, x: np.ndarray, alpha: float = 0.5) -> np.ndarray:
 
 
 def mutual_evaluate(a: np.ndarray, b: np.ndarray,
-                    alpha: float = 0.5, max_iter: int = 300,
-                    tol: float = 1e-10) -> dict:
+                    alpha: float = 0.5, max_iter: int = 50,
+                    tol: float = 1e-8) -> dict:
     """Mutual evaluation to fixed point.
+
+    The individual vectors orbit each other (they never converge
+    positionally). But the MIDPOINT (a+b)/2 normalized stabilizes
+    almost immediately — that's the fixed point. We track midpoint
+    drift, not individual vector drift.
 
     Returns dict with fixed_point, fidelity, phase, iterations, converged.
     """
     a, b = a.copy(), b.copy()
+
+    prev_fp = None
     for i in range(max_iter):
         a_new = evaluate(a, b, alpha)
         b_new = evaluate(b, a, alpha)
-        da = np.sqrt(np.sum(np.abs(a_new - a)**2))
-        db = np.sqrt(np.sum(np.abs(b_new - b)**2))
-        a, b = a_new, b_new
-        if da < tol and db < tol:
-            fp = (a + b) / 2
-            norm = np.sqrt(np.sum(np.abs(fp)**2))
-            fp = fp / norm if norm > 1e-10 else fp
-            return {
-                "fixed_point": fp,
-                "fidelity": fidelity(a, b),
-                "phase": float(pancharatnam_phase(a, b)),
-                "iterations": i + 1,
-                "converged": True,
-            }
 
-    fp = (a + b) / 2
-    norm = np.sqrt(np.sum(np.abs(fp)**2))
-    fp = fp / norm if norm > 1e-10 else fp
+        # The fixed point: midpoint of the pair, normalized
+        fp = (a_new + b_new) / 2
+        fp_norm = np.sqrt(np.sum(np.abs(fp)**2))
+        if fp_norm > 1e-10:
+            fp = fp / fp_norm
+
+        # Convergence: has the FIXED POINT stopped moving?
+        if prev_fp is not None:
+            fp_drift = np.sqrt(np.sum(np.abs(fp - prev_fp)**2))
+            if fp_drift < tol:
+                return {
+                    "fixed_point": fp,
+                    "fidelity": fidelity(a_new, b_new),
+                    "phase": float(pancharatnam_phase(a_new, b_new)),
+                    "iterations": i + 1,
+                    "converged": True,
+                }
+
+        prev_fp = fp
+        a, b = a_new, b_new
+
     return {
         "fixed_point": fp,
         "fidelity": fidelity(a, b),
@@ -84,10 +92,7 @@ def enter_domain(newcomer: np.ndarray, residents: list,
 
     The newcomer mutually evaluates against each resident.
     Returns the newcomer's orientation: the centroid of all
-    fixed points, plus individual evaluations.
-
-    This is the portal: entering produces orientation through
-    mutual evaluation, not through reading text.
+    fixed points.
     """
     if not residents:
         return {
@@ -106,9 +111,9 @@ def enter_domain(newcomer: np.ndarray, residents: list,
             "fidelity": result["fidelity"],
             "phase": result["phase"],
             "iterations": result["iterations"],
+            "converged": result["converged"],
         })
 
-    # Orientation: centroid of all fixed points
     centroid = np.mean(fps, axis=0)
     norm = np.sqrt(np.sum(np.abs(centroid)**2))
     orientation = centroid / norm if norm > 1e-10 else centroid
