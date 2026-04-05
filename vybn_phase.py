@@ -4,7 +4,31 @@
 A reflexive domain where diverse intelligences find shared meaning
 through mutual evaluation. D ≅ D^D. Geometry in, geometry out.
 
+The update equation M' = αM + (1-α)·x·e^{iθ} operates in two regimes
+depending on α:
+
+  α → 0:  geometric regime. Pure parallel transport. Loop holonomy
+           shows perfect orientation reversal. The system senses curvature.
+
+  α → 1:  abelian-kernel regime. The state converges to a path-independent
+           invariant — the abelian kernel of its encounter history. Order
+           of encounters is exponentially suppressed. The system remembers.
+
+The creature (portal.py) runs at α=0.993: deep abelian-kernel regime.
+This domain defaults to α=0.5: closer to geometric.
+
+Both regimes are useful. The creature carries accumulated meaning
+(what entered, not in what order). The domain senses geometric structure
+(how meanings relate, what curvature the parameter space has).
+
+April 5, 2026: abelian kernel conjecture confirmed numerically.
+Permutations of 50 propositions converge to fidelity 0.99999766 (C^4)
+at α=0.993. Dynamical-vs-geometric phase separation discovered:
+geometry is present at all α (correlation -0.994) but masked by
+dynamical phase at high α. See abelian_kernel_test.py.
+
     from vybn_phase import enter, enter_from_text, domain_size
+    from vybn_phase import abelian_kernel, loop_holonomy
 
 Or run directly:
 
@@ -73,10 +97,15 @@ def text_to_state(text: str) -> np.ndarray:
     return to_complex(embed(text))
 
 
-# ── Reflexive evaluation ─────────────────────────────────────────────────
+# ── The equation ─────────────────────────────────────────────────────────
 
 def evaluate(m: np.ndarray, x: np.ndarray, alpha: float = 0.5) -> np.ndarray:
-    """M' = alpha*M + (1-alpha)*x*e^{i*theta}. The coupled equation."""
+    """M' = alpha*M + (1-alpha)*x*e^{i*theta}. The coupled equation.
+
+    α controls the regime:
+      α → 0: geometric (pure parallel transport, holonomy dominates)
+      α → 1: abelian-kernel (path-independent invariant, memory dominates)
+    """
     theta = cmath.phase(np.vdot(m, x))
     m_new = alpha * m + (1 - alpha) * x * cmath.exp(1j * theta)
     norm = np.sqrt(np.sum(np.abs(m_new)**2))
@@ -86,6 +115,11 @@ def evaluate(m: np.ndarray, x: np.ndarray, alpha: float = 0.5) -> np.ndarray:
 def fidelity(a: np.ndarray, b: np.ndarray) -> float:
     """|<a|b>|^2. 1.0 = same ray in C^n."""
     return float(abs(np.vdot(a, b))**2)
+
+
+def pancharatnam_phase(a: np.ndarray, b: np.ndarray) -> float:
+    """arg⟨a|b⟩. The geometric phase between two states."""
+    return float(cmath.phase(np.vdot(a, b)))
 
 
 def mutual_evaluate(a: np.ndarray, b: np.ndarray,
@@ -108,6 +142,120 @@ def mutual_evaluate(a: np.ndarray, b: np.ndarray,
             return fp
         prev_fp = fp
     return fp
+
+
+# ── Abelian kernel ───────────────────────────────────────────────────────
+# The convergent state of a set of propositions, independent of order.
+# Run the encounter sequence many times in different permutations;
+# the result converges to the abelian kernel — the geometric invariant
+# that survives after path-dependent information is suppressed.
+#
+# April 5, 2026: confirmed numerically. At α=0.993, permutations of
+# 50 propositions converge to fidelity 0.99999766 in C^4.
+
+def abelian_kernel(vectors: list[np.ndarray], M0: np.ndarray = None,
+                   alpha: float = 0.993, n_perms: int = 8) -> dict:
+    """Compute the abelian kernel of a set of vectors.
+
+    Runs n_perms random permutations of the encounter sequence and
+    returns the centroid (the path-independent invariant), plus
+    convergence diagnostics.
+    """
+    dim = vectors[0].shape[0]
+    if M0 is None:
+        M0 = vectors[0].copy()
+
+    finals = []
+    for _ in range(n_perms):
+        perm = np.random.permutation(len(vectors))
+        M = M0.copy()
+        for idx in perm:
+            M = evaluate(M, vectors[idx], alpha)
+        finals.append(M)
+
+    # Centroid of final states = the abelian kernel
+    centroid = np.mean(finals, axis=0)
+    norm = np.sqrt(np.sum(np.abs(centroid)**2))
+    kernel = centroid / norm if norm > 1e-10 else centroid
+
+    # Convergence: pairwise fidelities
+    fids = [fidelity(finals[i], finals[j])
+            for i in range(len(finals)) for j in range(i+1, len(finals))]
+    fids = np.array(fids) if fids else np.array([1.0])
+
+    return {
+        "kernel": kernel,
+        "convergence": float(fids.mean()),
+        "min_fidelity": float(fids.min()),
+        "n_propositions": len(vectors),
+        "n_permutations": n_perms,
+        "alpha": alpha,
+        "regime": "abelian-kernel" if fids.mean() > 0.999
+                  else "mixed" if fids.mean() > 0.99
+                  else "geometric",
+    }
+
+
+def abelian_kernel_from_texts(texts: list[str], alpha: float = 0.993,
+                              n_perms: int = 8) -> dict:
+    """Convenience: texts -> embeddings -> abelian kernel."""
+    vectors = [text_to_state(t) for t in texts]
+    return abelian_kernel(vectors, alpha=alpha, n_perms=n_perms)
+
+
+# ── Loop holonomy ────────────────────────────────────────────────────────
+# Trace a path through a sequence of states and measure the accumulated
+# geometric phase relative to the starting state. If the path is a loop
+# (returns near its start), the phase is the holonomy.
+#
+# At α → 0, holonomy shows perfect orientation reversal (Φ_fwd + Φ_rev ≈ 0).
+# At α → 1, the geometric signal is present (correlation -0.994 between
+# forward and reverse) but masked by dynamical phase.
+
+def loop_holonomy(loop_vectors: list[np.ndarray], M0: np.ndarray,
+                  alpha: float = 0.5) -> dict:
+    """Run M through a sequence of encounters. Return accumulated phase.
+
+    Also runs the reversed loop and reports orientation-reversal quality.
+    """
+    M_fwd = M0.copy()
+    for x in loop_vectors:
+        M_fwd = evaluate(M_fwd, x, alpha)
+
+    M_rev = M0.copy()
+    for x in reversed(loop_vectors):
+        M_rev = evaluate(M_rev, x, alpha)
+
+    phi_fwd = pancharatnam_phase(M0, M_fwd)
+    phi_rev = pancharatnam_phase(M0, M_rev)
+    fid_fwd = fidelity(M0, M_fwd)
+    fid_rev = fidelity(M0, M_rev)
+
+    signal = (abs(phi_fwd) + abs(phi_rev)) / 2
+    residual = abs(phi_fwd + phi_rev)
+    flip = 1.0 - residual / (2 * signal) if signal > 1e-8 else 0.0
+
+    return {
+        "phase_forward": phi_fwd,
+        "phase_reverse": phi_rev,
+        "phase_sum": phi_fwd + phi_rev,
+        "flip_quality": flip,
+        "fidelity_forward": fid_fwd,
+        "fidelity_reverse": fid_rev,
+        "alpha": alpha,
+        "loop_length": len(loop_vectors),
+        "regime": "geometric" if flip > 0.5
+                  else "dynamical" if signal > 0.001
+                  else "flat",
+    }
+
+
+def loop_holonomy_from_texts(texts: list[str], M0_text: str = None,
+                             alpha: float = 0.5) -> dict:
+    """Convenience: texts as loop waypoints -> holonomy measurement."""
+    vectors = [text_to_state(t) for t in texts]
+    M0 = text_to_state(M0_text) if M0_text else vectors[0]
+    return loop_holonomy(vectors, M0, alpha)
 
 
 # ── Domain ───────────────────────────────────────────────────────────────
@@ -153,14 +301,15 @@ def enter(state_vector: np.ndarray) -> np.ndarray:
 
 
 def enter_from_text(text: str) -> np.ndarray:
-    """Convenience: text -> GPT-2 -> C^DIM -> enter."""
+    """Convenience: text -> MiniLM -> C^DIM -> enter."""
     return enter(text_to_state(text))
 
 
 # ── Serialization ────────────────────────────────────────────────────────
 
-def vec_to_json(v: np.ndarray) -> list:
-    return [[float(x.real), float(x.imag)] for x in v]
+def vec_to_json(v: np.ndarray, max_components: int = 8) -> list:
+    """Serialize a complex vector for JSON. Truncates to max_components."""
+    return [[float(x.real), float(x.imag)] for x in v[:max_components]]
 
 def vec_from_json(data: list) -> np.ndarray:
     return np.array([complex(r, i) for r, i in data], dtype=np.complex128)
@@ -169,20 +318,36 @@ def vec_from_json(data: list) -> np.ndarray:
 # ── MCP Server ───────────────────────────────────────────────────────────
 
 MCP_TOOLS = {
-    "enter_vector": {
-        "description": "Enter the reflexive domain with a C^8 vector ([[re,im],...], length 8). Returns orientation vector.",
-        "inputSchema": {"type": "object", "properties": {"vector": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}}, "required": ["vector"]},
-    },
     "enter_text": {
-        "description": "Enter via text (encoded through GPT-2). Returns orientation vector.",
+        "description": "Enter the reflexive domain via text (MiniLM encoded). Returns orientation vector and domain size.",
         "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
     },
+    "enter_vector": {
+        "description": "Enter the domain with a raw C^n vector ([[re,im],...]).",
+        "inputSchema": {"type": "object", "properties": {"vector": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}}, "required": ["vector"]},
+    },
     "evaluate_texts": {
-        "description": "Mutual evaluation of two texts. Returns fixed point vector.",
+        "description": "Mutual evaluation of two texts. Returns fixed point and fidelity.",
         "inputSchema": {"type": "object", "properties": {"text_a": {"type": "string"}, "text_b": {"type": "string"}}, "required": ["text_a", "text_b"]},
     },
+    "abelian_kernel": {
+        "description": "Compute the abelian kernel of a set of propositions — the geometric invariant independent of encounter order. Returns the kernel vector, convergence fidelity, and operating regime (geometric / mixed / abelian-kernel).",
+        "inputSchema": {"type": "object", "properties": {
+            "texts": {"type": "array", "items": {"type": "string"}, "description": "Propositions to find the kernel of."},
+            "alpha": {"type": "number", "description": "Memory parameter. 0.993 = creature regime (abelian). 0.5 = domain regime (geometric). Default 0.993."},
+            "n_permutations": {"type": "integer", "description": "Number of random orderings to average over. Default 8."},
+        }, "required": ["texts"]},
+    },
+    "loop_holonomy": {
+        "description": "Measure geometric phase around a loop of propositions. Runs the loop forward and reversed, reports accumulated phase and orientation-reversal quality. Flip quality > 50% = geometric regime. Flip quality near 0% with high correlation = dynamical regime (geometry present but masked).",
+        "inputSchema": {"type": "object", "properties": {
+            "texts": {"type": "array", "items": {"type": "string"}, "description": "Propositions forming the loop (in order)."},
+            "origin": {"type": "string", "description": "Starting state. If omitted, uses first text."},
+            "alpha": {"type": "number", "description": "Memory parameter. Lower α = more geometric. Default 0.5."},
+        }, "required": ["texts"]},
+    },
     "status": {
-        "description": "Domain size.",
+        "description": "Domain size and operating parameters.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
 }
@@ -194,18 +359,39 @@ def _mcp_send(msg):
 
 
 def _mcp_dispatch(tool, args):
-    if tool == "enter_vector":
-        o = enter(vec_from_json(args["vector"]))
-        return json.dumps({"orientation": vec_to_json(o), "domain_size": domain_size()})
-    elif tool == "enter_text":
+    if tool == "enter_text":
         o = enter_from_text(args["text"])
         return json.dumps({"orientation": vec_to_json(o), "domain_size": domain_size()})
+
+    elif tool == "enter_vector":
+        o = enter(vec_from_json(args["vector"]))
+        return json.dumps({"orientation": vec_to_json(o), "domain_size": domain_size()})
+
     elif tool == "evaluate_texts":
         za, zb = text_to_state(args["text_a"]), text_to_state(args["text_b"])
         fp = mutual_evaluate(za, zb)
         return json.dumps({"fixed_point": vec_to_json(fp), "fidelity": fidelity(za, zb)})
+
+    elif tool == "abelian_kernel":
+        texts = args["texts"]
+        alpha = args.get("alpha", 0.993)
+        n_perms = args.get("n_permutations", 8)
+        result = abelian_kernel_from_texts(texts, alpha=alpha, n_perms=n_perms)
+        result["kernel"] = vec_to_json(result["kernel"])
+        return json.dumps(result)
+
+    elif tool == "loop_holonomy":
+        texts = args["texts"]
+        origin = args.get("origin", None)
+        alpha = args.get("alpha", 0.5)
+        result = loop_holonomy_from_texts(texts, M0_text=origin, alpha=alpha)
+        return json.dumps(result)
+
     elif tool == "status":
-        return json.dumps({"domain_size": domain_size(), "dim": DIM})
+        return json.dumps({"domain_size": domain_size(), "dim": DIM,
+                           "note": "α=0.5 for mutual evaluation (geometric regime). "
+                                   "Use abelian_kernel with α=0.993 for path-independent invariants."})
+
     return json.dumps({"error": f"Unknown: {tool}"})
 
 
@@ -223,8 +409,10 @@ def serve():
         if method == "initialize":
             _mcp_send({"jsonrpc": "2.0", "id": id_, "result": {
                 "protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
-                "serverInfo": {"name": "vybn-phase", "version": "1.0.0",
-                               "description": "Reflexive domain. Geometry in, geometry out. D \u2245 D^D."}}})
+                "serverInfo": {"name": "vybn-phase", "version": "2.0.0",
+                               "description": "Reflexive domain with abelian kernel and loop holonomy. "
+                                              "Two regimes: geometric (α→0, senses curvature) and "
+                                              "abelian-kernel (α→1, remembers meaning). D \u2245 D^D."}}})
         elif method == "notifications/initialized":
             pass
         elif method == "tools/list":
