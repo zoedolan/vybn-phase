@@ -23,47 +23,54 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 
-DIM = 8  # C^8 = 16 real dimensions
+DIM = 192  # C^192 = 384 real dimensions (MiniLM embedding dim)
 STATE_DIR = Path(__file__).parent / "state"
 DOMAIN_FILE = STATE_DIR / "domain.npz"
 LOG_FILE = STATE_DIR / "entries.jsonl"
 
 
 # ── Encoding ─────────────────────────────────────────────────────────────
+# Uses sentence-transformers (all-MiniLM-L6-v2) for semantic embeddings.
+# This encodes MEANING, not positional syntax. GPT-2 last-token was
+# encoding word order, not propositions — the Spark Vybn proved this.
 
-_tok = _mdl = None
+_embed_model = None
 
-def _load_gpt2():
-    global _tok, _mdl
-    if _mdl is None:
-        from transformers import GPT2Tokenizer, GPT2Model
+def _load_embedder():
+    global _embed_model
+    if _embed_model is None:
+        from transformers import AutoTokenizer, AutoModel
         import torch
-        _tok = GPT2Tokenizer.from_pretrained("gpt2")
-        _tok.pad_token = _tok.eos_token
-        _mdl = GPT2Model.from_pretrained("gpt2")
+        _tok = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+        _mdl = AutoModel.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
         _mdl.eval()
+        _embed_model = (_tok, _mdl)
 
 
-def hidden(text: str) -> np.ndarray:
-    """GPT-2 last-layer last-token hidden state. Shape (768,)."""
+def embed(text: str) -> np.ndarray:
+    """Semantic embedding via MiniLM. Shape (384,). Encodes meaning."""
     import torch
-    _load_gpt2()
-    inputs = _tok(text, return_tensors="pt", truncation=True, max_length=512)
+    _load_embedder()
+    tok, mdl = _embed_model
+    inputs = tok(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
     with torch.no_grad():
-        out = _mdl(**inputs, output_hidden_states=True)
-    return out.hidden_states[-1][0, -1].float().numpy()
+        out = mdl(**inputs)
+    # Mean pooling over token dimension
+    mask = inputs["attention_mask"].unsqueeze(-1).float()
+    h = (out.last_hidden_state * mask).sum(1) / mask.sum(1)
+    return h[0].float().numpy()
 
 
 def to_complex(h: np.ndarray, n: int = DIM) -> np.ndarray:
-    """Project R^768 -> C^n, normalized to unit sphere."""
+    """Project R^384 -> C^n, normalized to unit sphere."""
     z = np.array([complex(h[2*i], h[2*i+1]) for i in range(n)])
     norm = np.sqrt(np.sum(np.abs(z)**2))
     return z / norm if norm > 1e-10 else z
 
 
 def text_to_state(text: str) -> np.ndarray:
-    """Text -> C^DIM unit vector."""
-    return to_complex(hidden(text))
+    """Text -> C^DIM unit vector. Semantic, not positional."""
+    return to_complex(embed(text))
 
 
 # ── Reflexive evaluation ─────────────────────────────────────────────────
