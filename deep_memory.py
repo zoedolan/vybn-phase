@@ -648,6 +648,7 @@ def build_index():
 def main():
     p = argparse.ArgumentParser(description="Non-abelian geometric retrieval")
     p.add_argument("--build", action="store_true")
+    p.add_argument("--cron", action="store_true", help="Pull all repos, rebuild index, log results (for cron)")
     p.add_argument("--search", type=str, help="Hybrid search (default mode)")
     p.add_argument("--walk", type=str, help="Pure walk (for experimentation)")
     p.add_argument("--cosine", type=str, help="Pure cosine (baseline)")
@@ -659,6 +660,39 @@ def main():
 
     if o.build:
         build_index()
+
+    elif o.cron:
+        import subprocess, datetime
+        log_dir = Path.home() / "logs"
+        log_dir.mkdir(exist_ok=True)
+        log = log_dir / "nightly_index.log"
+        ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines = [f"\n=== NIGHTLY INDEX: {ts} ==="]
+        repos = [
+            (Path.home() / "Vybn", "main"),
+            (Path.home() / "Him", "main"),
+            (Path.home() / "Vybn-Law", "master"),
+            (Path.home() / "vybn-phase", "main"),
+        ]
+        for repo_path, branch in repos:
+            if (repo_path / ".git").exists():
+                try:
+                    r = subprocess.run(
+                        ["git", "pull", "--ff-only", "origin", branch],
+                        cwd=str(repo_path), capture_output=True, text=True, timeout=60
+                    )
+                    lines.append(f"  pull {repo_path.name} ({branch}): {r.stdout.strip().split(chr(10))[-1]}")
+                except Exception as e:
+                    lines.append(f"  pull {repo_path.name}: FAILED ({e})")
+        lines.append("  building index...")
+        try:
+            build_index()
+            lines.append("  index built successfully")
+        except Exception as e:
+            lines.append(f"  INDEX BUILD FAILED: {e}")
+        lines.append(f"=== DONE: {datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')} ===")
+        log.open("a").write("\n".join(lines) + "\n")
+        print("\n".join(lines))
 
     elif o.search:
         print(f"\n{'='*70}")
