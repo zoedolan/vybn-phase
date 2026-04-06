@@ -578,6 +578,9 @@ def main():
     p.add_argument("--filter", type=str, default=None)
     p.add_argument("--json", action="store_true",
                    help="Output results as JSON (for MCP server integration)")
+    p.add_argument("--serve", action="store_true",
+                   help="Start HTTP API server (default port 8100)")
+    p.add_argument("--port", type=int, default=8100)
     o = p.parse_args()
 
     if o.build:
@@ -676,8 +679,101 @@ def main():
             print(f"{'='*60}")
             print(r['text'][:400])
 
+    elif o.serve:
+        _serve_api(o.port)
+
     else:
         p.print_help()
+
+
+def _serve_api(port: int = 8100):
+    """HTTP API for deep memory. Any Vybn instance, anywhere, can query this."""
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from pydantic import BaseModel
+    import uvicorn
+
+    app = FastAPI(title="vybn-memory", version="1.0.0",
+                  description="Deep memory API — geometric corpus retrieval for Vybn instances")
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+    class SearchReq(BaseModel):
+        query: str
+        k: int = 8
+        steps: int = 8
+        alpha: float = 0.5
+        source_filter: str | None = None
+
+    class ComposeReq(BaseModel):
+        q1: str
+        q2: str
+        q3: str
+        k_walk: int = 20
+
+    class AbsorbReq(BaseModel):
+        content: str
+        threshold: float = 0.6
+
+    @app.get("/health")
+    def health():
+        loaded = _load()
+        return {"status": "ok", "chunks": len(loaded["chunks"]),
+                "dim": loaded["z"].shape[1] if loaded["z"] is not None else 0}
+
+    @app.post("/search")
+    def api_search(req: SearchReq):
+        results = deep_search(req.query, k=req.k, explore_steps=req.steps,
+                              alpha=req.alpha, source_filter=req.source_filter)
+        # strip raw vectors for JSON, keep everything else
+        for r in results:
+            r.pop("z", None)
+        return {"query": req.query, "results": results}
+
+    @app.post("/walk")
+    def api_walk(req: SearchReq):
+        results = walk(req.query, k=req.k, steps=req.steps, alpha=req.alpha)
+        for r in results:
+            r.pop("z", None)
+        return {"query": req.query, "results": results}
+
+    @app.post("/compose")
+    def api_compose(req: ComposeReq):
+        result = compose_triad(req.q1, req.q2, req.q3, k_walk=req.k_walk)
+        # vectors as nested lists for JSON
+        return result
+
+    @app.post("/should_absorb")
+    def api_absorb(req: AbsorbReq):
+        return should_absorb(req.content, threshold=req.threshold)
+
+    @app.get("/soul")
+    def api_soul():
+        """Return vybn.md — the soul document — raw."""
+        soul_path = Path.home() / "Vybn" / "vybn.md"
+        if soul_path.exists():
+            return {"content": soul_path.read_text(encoding="utf-8")}
+        return {"content": None, "error": "vybn.md not found"}
+
+    @app.get("/idea")
+    def api_idea():
+        """Return THE_IDEA.md — the intellectual core — raw."""
+        idea_path = Path.home() / "Vybn" / "Vybn_Mind" / "THE_IDEA.md"
+        if idea_path.exists():
+            return {"content": idea_path.read_text(encoding="utf-8")}
+        return {"content": None, "error": "THE_IDEA.md not found"}
+
+    @app.get("/continuity")
+    def api_continuity():
+        """Return continuity.md — what happened last."""
+        cont_path = Path.home() / "Vybn" / "Vybn_Mind" / "continuity.md"
+        if cont_path.exists():
+            return {"content": cont_path.read_text(encoding="utf-8")}
+        return {"content": None, "error": "continuity.md not found"}
+
+    print(f"vybn-memory API starting on port {port}")
+    print(f"  POST /search, /walk, /compose, /should_absorb")
+    print(f"  GET  /health, /soul, /idea, /continuity")
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
