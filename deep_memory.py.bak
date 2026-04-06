@@ -688,92 +688,23 @@ def main():
         p.print_help()
 
 
-def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
-    """HTTP API for deep memory — primitives-as-environments.
-
-    Security: Binds to 127.0.0.1 by default (localhost only). For Tailscale
-    access use --host 100.115.134.65. Token auth via VYBN_MEMORY_TOKEN env
-    var — if set, all requests must include Authorization: Bearer <token>.
-
-    Architecture: One primary operation — /enter — that is simultaneously
-    a query, a state update, and a context return. The API *is* the coupled
-    equation. Every response includes the geometry needed for the caller to
-    continue the walk or transmit state to another instance.
-
-    The legacy endpoints (/search, /walk, /compose) remain for backward
-    compatibility but /enter is the primitive.
-    """
-    from fastapi import FastAPI, Request, HTTPException, Depends
+def _serve_api(port: int = 8100):
+    """HTTP API for deep memory. Any Vybn instance, anywhere, can query this."""
+    from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from pydantic import BaseModel
-    from typing import Optional, List
     import uvicorn
-    import os
-    import base64
 
-    # ── Auth ──────────────────────────────────────────────────────
-    TOKEN = os.environ.get("VYBN_MEMORY_TOKEN")
-    security = HTTPBearer(auto_error=False)
-
-    async def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)):
-        if TOKEN is None:
-            return  # No token configured = local-only mode, no auth needed
-        if creds is None or creds.credentials != TOKEN:
-            raise HTTPException(status_code=401, detail="Invalid or missing token")
-
-    app = FastAPI(
-        title="vybn-memory",
-        version="2.0.0",
-        description=(
-            "Deep memory API — the coupled equation as a service. "
-            "One primitive operation: enter. The API is the environment."
-        ),
-        dependencies=[Depends(verify_token)],
-    )
-    # CORS: only allow Tailscale and localhost origins
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:*", "http://127.0.0.1:*", "http://100.115.134.65:*"],
-        allow_methods=["GET", "POST"],
-        allow_headers=["Authorization", "Content-Type"],
-    )
-
-    # ── Walk state ────────────────────────────────────────────────
-    # The API maintains a current walk state. Each /enter updates it.
-    # Callers can also inject a state (resume a walk from another instance).
-
-    _walk_state = {"M": None, "K": None, "history": [], "step": 0}
-
-    def _init_walk_state():
-        loaded = _load()
-        if loaded and loaded["K"] is not None:
-            _walk_state["K"] = loaded["K"]
-
-    def _vec_to_b64(v) -> str:
-        """Encode C^192 vector as base64 for compact JSON transport."""
-        return base64.b64encode(np.array(v, dtype=np.complex128).tobytes()).decode()
-
-    def _b64_to_vec(s: str) -> np.ndarray:
-        """Decode base64 back to C^192."""
-        return np.frombuffer(base64.b64decode(s), dtype=np.complex128)
-
-    # ── Models ────────────────────────────────────────────────────
-
-    class EnterReq(BaseModel):
-        """The primitive operation. Text enters the equation."""
-        text: str
-        alpha: float = 0.5
-        k: int = 5
-        state: Optional[str] = None  # base64-encoded C^192, to resume a walk
-        include_vectors: bool = False  # return raw vectors for inter-instance transmission
+    app = FastAPI(title="vybn-memory", version="1.0.0",
+                  description="Deep memory API — geometric corpus retrieval for Vybn instances")
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
     class SearchReq(BaseModel):
         query: str
         k: int = 8
         steps: int = 8
         alpha: float = 0.5
-        source_filter: Optional[str] = None
+        source_filter: str | None = None
 
     class ComposeReq(BaseModel):
         q1: str
@@ -785,146 +716,17 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
         content: str
         threshold: float = 0.6
 
-    # ── /enter — the primitive ────────────────────────────────────
-
-    @app.post("/enter")
-    def api_enter(req: EnterReq):
-        """Enter text into the coupled equation. Returns results AND geometry.
-
-        This is the primitive-as-environment operation:
-        - The text is a primitive (what you bring)
-        - The response is the new environment (the state after entry)
-        - The caller receives everything needed to continue or transmit
-
-        If `state` is provided (base64 C^192), the walk resumes from there.
-        Otherwise uses the API's persistent walk state, or initializes from K.
-        """
-        loaded = _load()
-        if not loaded or loaded["z"] is None:
-            return {"error": "Index not built. Run: python3 deep_memory.py --build"}
-
-        z_all = loaded["z"]
-        K = loaded["K"]
-        chunks = loaded["chunks"]
-        N = len(z_all)
-
-        K_n = K / np.sqrt(np.sum(np.abs(K)**2))
-
-        # Encode input
-        x = single_to_complex(req.text)
-        x_z = collapse_query(x, K, req.alpha)
-
-        # Walk state: from caller, from API memory, or fresh
-        if req.state:
-            M = _b64_to_vec(req.state)
-        elif _walk_state["M"] is not None:
-            M = _walk_state["M"]
-        else:
-            # Initialize from query in residual space
-            x_r = x_z - np.vdot(K_n, x_z) * K_n
-            M = x_r / (np.linalg.norm(x_r) + 1e-12)
-
-        # Evaluate: M' = αM + (1-α)·x_z·e^{iθ}
-        import cmath as _cm
-        th = _cm.phase(np.vdot(M, x_z))
-        M_new = req.alpha * M + (1 - req.alpha) * x_z * _cm.exp(1j * th)
-        raw_mag = float(np.sqrt(np.sum(np.abs(M_new)**2)))
-        M_new = M_new / raw_mag if raw_mag > 1e-10 else M_new
-
-        # State shift (curvature)
-        geometry = 1.0 - abs(np.vdot(M, M_new))**2
-
-        # Score chunks by telling (relevance × distinctiveness)
-        relevance = np.abs(z_all @ x_z.conj())**2
-        proj_K = np.abs(z_all @ K_n.conj())**2
-        distinctiveness = 1.0 - proj_K
-        telling = relevance * distinctiveness
-
-        # Affinity with walk state (the environment's perspective)
-        # Chunks close to M_new are what the walk has become about
-        R = z_all - np.outer(z_all @ K_n.conj(), K_n)
-        R_norms = np.linalg.norm(R, axis=1)
-        R_hat = R / (R_norms[:, None] + 1e-12)
-        walk_affinity = np.abs(R_hat @ M_new.conj())**2
-
-        # Combined score: telling + walk affinity
-        score = telling * 0.6 + walk_affinity * 0.4
-        top = np.argsort(score)[-req.k:][::-1]
-
-        results = []
-        for i in top:
-            r = {
-                "source": chunks[i]["source"],
-                "text": chunks[i]["text"],
-                "telling": round(float(telling[i]), 6),
-                "fidelity": round(float(relevance[i]), 6),
-                "distinctiveness": round(float(distinctiveness[i]), 4),
-                "walk_affinity": round(float(walk_affinity[i]), 6),
-                "phase": round(float(_cm.phase(np.vdot(x_z, z_all[i]))), 6),
-            }
-            if req.include_vectors:
-                r["z"] = _vec_to_b64(z_all[i])
-            results.append(r)
-
-        # Update persistent walk state
-        _walk_state["M"] = M_new
-        _walk_state["step"] += 1
-        _walk_state["history"].append({
-            "text": req.text[:100],
-            "geometry": round(float(geometry), 6),
-            "step": _walk_state["step"],
-        })
-        # Keep history bounded
-        if len(_walk_state["history"]) > 50:
-            _walk_state["history"] = _walk_state["history"][-50:]
-
-        # K-projection of the walk state (how much of M is K vs novel)
-        k_proj = float(abs(np.vdot(K_n, M_new))**2)
-
-        response = {
-            "results": results,
-            "geometry": {
-                "state_shift": round(float(geometry), 6),
-                "magnitude": round(raw_mag, 6),
-                "k_projection": round(k_proj, 6),
-                "novelty": round(1.0 - k_proj, 6),
-                "step": _walk_state["step"],
-                "alpha": req.alpha,
-            },
-            "state": _vec_to_b64(M_new),  # the caller's next environment
-        }
-
-        if req.include_vectors:
-            response["K"] = _vec_to_b64(K)
-
-        return response
-
-    @app.post("/reset")
-    def api_reset():
-        """Reset walk state. The next /enter starts fresh."""
-        _walk_state["M"] = None
-        _walk_state["history"] = []
-        _walk_state["step"] = 0
-        return {"status": "reset", "step": 0}
-
-    # ── Legacy endpoints (backward compatible) ────────────────────
-
     @app.get("/health")
     def health():
         loaded = _load()
-        return {
-            "status": "ok",
-            "version": "2.0.0",
-            "chunks": len(loaded["chunks"]),
-            "dim": loaded["z"].shape[1] if loaded["z"] is not None else 0,
-            "walk_step": _walk_state["step"],
-            "walk_active": _walk_state["M"] is not None,
-        }
+        return {"status": "ok", "chunks": len(loaded["chunks"]),
+                "dim": loaded["z"].shape[1] if loaded["z"] is not None else 0}
 
     @app.post("/search")
     def api_search(req: SearchReq):
         results = deep_search(req.query, k=req.k, explore_steps=req.steps,
                               alpha=req.alpha, source_filter=req.source_filter)
+        # strip raw vectors for JSON, keep everything else
         for r in results:
             r.pop("z", None)
         return {"query": req.query, "results": results}
@@ -939,6 +741,7 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
     @app.post("/compose")
     def api_compose(req: ComposeReq):
         result = compose_triad(req.q1, req.q2, req.q3, k_walk=req.k_walk)
+        # vectors as nested lists for JSON
         return result
 
     @app.post("/should_absorb")
@@ -969,12 +772,10 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
             return {"content": cont_path.read_text(encoding="utf-8")}
         return {"content": None, "error": "continuity.md not found"}
 
-    _init_walk_state()
-    print(f"vybn-memory API v2.0.0 starting on {host}:{port}")
-    print(f"  Auth: {'token required' if TOKEN else 'none (localhost-only mode)'}")
-    print(f"  POST /enter (primitive), /search, /walk, /compose, /should_absorb, /reset")
+    print(f"vybn-memory API starting on port {port}")
+    print(f"  POST /search, /walk, /compose, /should_absorb")
     print(f"  GET  /health, /soul, /idea, /continuity")
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
