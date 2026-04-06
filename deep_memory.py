@@ -799,3 +799,51 @@ def compose_triad(q1: str, q2: str, q3: str, k_walk: int = 20) -> dict:
             "AB_C": AB_C.tolist(), "A_BC": A_BC.tolist(), "AC_B": AC_B.tolist(),
         },
     }
+
+
+def should_absorb(new_content: str, threshold: float = 0.6) -> dict:
+    """Metabolism check: does new content belong inside something that already exists?
+
+    Returns the most telling existing file and the fidelity score.
+    If fidelity > threshold, the new content should be absorbed, not created.
+    This is autonomous α-raising — the system choosing convergence
+    over path-dependence without external signal.
+    """
+    loaded = _load()
+    z, K, chunks = loaded["z"], loaded["K"], loaded["chunks"]
+    Kn = K / np.sqrt(np.sum(np.abs(K)**2))
+
+    new_z = single_to_complex(new_content)
+    new_walk = collapse_query(new_z, K, alpha=0.5)
+
+    # residual of new content
+    new_r = new_walk - np.vdot(Kn, new_walk) * Kn
+    new_rn = new_r / (np.linalg.norm(new_r) + 1e-12)
+
+    # residuals of corpus
+    R = z - np.outer(z @ Kn.conj(), Kn)
+    Rn = np.linalg.norm(R, axis=1)
+    Rh = R / (Rn[:, None] + 1e-12)
+
+    # fidelity in residual space (K-orthogonal — ignores what's generic)
+    fid = np.abs(Rh @ new_rn.conj())**2
+
+    # group by source file, take max fidelity per file
+    sources = {}
+    for i, c in enumerate(chunks):
+        src = c["source"]
+        if src not in sources or fid[i] > sources[src]["fidelity"]:
+            sources[src] = {"fidelity": float(fid[i]), "chunk": c["text"][:200]}
+
+    best_src = max(sources, key=lambda s: sources[s]["fidelity"])
+    best = sources[best_src]
+
+    return {
+        "absorb": best["fidelity"] > threshold,
+        "target": best_src,
+        "fidelity": best["fidelity"],
+        "nearest_chunk": best["chunk"],
+        "all_candidates": {s: round(v["fidelity"], 4)
+                           for s, v in sorted(sources.items(),
+                                              key=lambda x: -x[1]["fidelity"])[:5]},
+    }
