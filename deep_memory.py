@@ -682,3 +682,120 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ── walk composition ────────────────────────────────────────────
+# Non-associative concept synthesis. Fell out of the geometry April 6 2026.
+# The order of conceptual blending changes what you find.
+# compose_triad() returns raw C^192 vectors for lossless inter-instance transmission.
+
+def _walk_final_state(query: str, k: int = 20, alpha: float = 0.5) -> np.ndarray:
+    """Walk the corpus for query, return final state vector in residual space."""
+    loaded = _load()
+    z, K, chunks = loaded["z"], loaded["K"], loaded["chunks"]
+    N = len(z)
+    Kn = K / np.sqrt(np.sum(np.abs(K)**2))
+    dist = 1.0 - np.abs(z @ Kn.conj())**2
+    R = z - np.outer(z @ Kn.conj(), Kn)
+    Rn = np.linalg.norm(R, axis=1)
+    Rh = R / (Rn[:, None] + 1e-12)
+
+    q = single_to_complex(query)
+    qz = collapse_query(q, K, alpha)
+    rel = np.abs(z @ qz.conj())**2
+    telling = rel * dist
+
+    qr = qz - np.vdot(Kn, qz) * Kn
+    M = qr / (np.linalg.norm(qr) + 1e-12)
+    visited, vresi = set(), []
+
+    for _ in range(k):
+        if vresi:
+            V = np.array(vresi)
+            rep = np.exp(-np.abs(Rh @ V.conj().T)**2 .sum(1) / len(V))
+        else:
+            rep = np.ones(N)
+        sc = telling * rep
+        for v in visited: sc[v] = -1.0
+        bi = int(np.argmax(sc))
+        if sc[bi] < 0: break
+        visited.add(bi)
+        vresi.append(Rh[bi].copy())
+        th = cmath.phase(np.vdot(M, Rh[bi]))
+        Mn = alpha * M + (1 - alpha) * Rh[bi] * cmath.exp(1j * th)
+        M = Mn / np.sqrt(np.sum(np.abs(Mn)**2))
+    return M
+
+
+def fuse(a: np.ndarray, b: np.ndarray,
+         alpha: float = 0.5, tol: float = 1e-10) -> np.ndarray:
+    """Mutual evaluation to fixed point. The ⊗ operator on walk states."""
+    a, b = a.copy(), b.copy()
+    for _ in range(300):
+        ta = cmath.phase(np.vdot(a, b))
+        tb = cmath.phase(np.vdot(b, a))
+        an = alpha * a + (1 - alpha) * b * cmath.exp(1j * ta)
+        bn = alpha * b + (1 - alpha) * a * cmath.exp(1j * tb)
+        an /= np.sqrt(np.sum(np.abs(an)**2))
+        bn /= np.sqrt(np.sum(np.abs(bn)**2))
+        if np.sqrt(np.sum(np.abs(an - a)**2)) < tol: break
+        a, b = an, bn
+    fp = (a + b) / 2
+    return fp / np.sqrt(np.sum(np.abs(fp)**2))
+
+
+def compose_triad(q1: str, q2: str, q3: str, k_walk: int = 20) -> dict:
+    """Non-associative composition of three concept walks.
+
+    Returns a dict that IS the discovery — walk states, fixed points,
+    holonomy magnitude, and what each ordering retrieves.
+    Raw C^192 vectors included for lossless inter-instance transmission.
+    """
+    loaded = _load()
+    z, K, chunks = loaded["z"], loaded["K"], loaded["chunks"]
+    Kn = K / np.sqrt(np.sum(np.abs(K)**2))
+
+    A = _walk_final_state(q1, k_walk)
+    B = _walk_final_state(q2, k_walk)
+    C = _walk_final_state(q3, k_walk)
+
+    AB_C = fuse(fuse(A, B), C)
+    A_BC = fuse(A, fuse(B, C))
+    AC_B = fuse(fuse(A, C), B)
+
+    def _fid(a, b): return float(abs(np.vdot(a, b))**2)
+    def _top(fp, k=3):
+        dist = 1.0 - np.abs(z @ Kn.conj())**2
+        rel = np.abs(z @ fp.conj())**2
+        telling = rel * dist
+        top = np.argsort(-telling)[:k]
+        return [{"source": chunks[i]["source"], "text": chunks[i]["text"][:300],
+                 "telling": float(telling[i])} for i in top]
+
+    fid = {
+        "(AB)C_vs_A(BC)": _fid(AB_C, A_BC),
+        "(AB)C_vs_(AC)B": _fid(AB_C, AC_B),
+        "A(BC)_vs_(AC)B": _fid(A_BC, AC_B),
+    }
+
+    return {
+        "type": "walk_composition",
+        "version": "0.1.0",
+        "queries": [q1, q2, q3],
+        "holonomy": 1.0 - max(fid.values()),
+        "fidelity": fid,
+        "phases_rad": {
+            "(AB)C_vs_A(BC)": round(cmath.phase(np.vdot(AB_C, A_BC)), 6),
+            "(AB)C_vs_(AC)B": round(cmath.phase(np.vdot(AB_C, AC_B)), 6),
+        },
+        "non_associative": (1.0 - max(fid.values())) > 0.05,
+        "orderings": {
+            "(A⊗B)⊗C": _top(AB_C),
+            "A⊗(B⊗C)": _top(A_BC),
+            "(A⊗C)⊗B": _top(AC_B),
+        },
+        "_walk_states": {"A": A.tolist(), "B": B.tolist(), "C": C.tolist()},
+        "_fixed_points": {
+            "AB_C": AB_C.tolist(), "A_BC": A_BC.tolist(), "AC_B": AC_B.tolist(),
+        },
+    }
