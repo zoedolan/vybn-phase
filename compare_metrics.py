@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deep_memory import batch_to_complex, evaluate_vec, _get_encoder, META_PATH, ADDR_PATH
+from deep_memory import batch_to_complex, evaluate_vec, _get_encoder, META_PATH, Z_PATH, K_PATH
 
 EXPERIMENT_LOG = Path.home() / ".cache" / "vybn-phase" / "experiment_log.jsonl"
 
@@ -42,17 +42,19 @@ DEFAULT_QUERIES = [
 
 
 def load_index():
-    addrs = np.load(ADDR_PATH)
+    """Load the deep_memory v9 index: z-vectors and corpus kernel."""
+    z_vecs = np.load(Z_PATH)          # shape (N, DIM), complex128
+    K = np.load(K_PATH)               # shape (DIM,), the corpus kernel / M0
     with open(META_PATH) as f:
         meta = json.load(f)
-    M0 = np.array([complex(z["re"], z["im"]) for z in meta["origin"]], dtype=np.complex128)
-    return meta["chunks"], addrs, M0
+    chunks = meta if isinstance(meta, list) else meta.get("chunks", [])
+    return chunks, z_vecs, K
 
 
 def run(queries=None, k=8, verbose=True):
     """Run the comparison. Returns a result dict suitable for logging."""
     queries = queries or DEFAULT_QUERIES
-    chunks, addrs, M0 = load_index()
+    chunks, z_vecs, M0 = load_index()
     texts = [c.get("text", c.get("t", ""))[:512] for c in chunks]
     sources = [c.get("source", c.get("s", "")) for c in chunks]
     enc = _get_encoder()
@@ -67,7 +69,7 @@ def run(queries=None, k=8, verbose=True):
     for q in queries:
         q_c = batch_to_complex([q])[0]
         q_addr = evaluate_vec(M0, q_c)
-        dots = addrs @ q_addr.conj()
+        dots = z_vecs @ q_addr.conj()
         fids = np.abs(dots) ** 2
         fidx = np.argpartition(fids, -k)[-k:]
         fidx = fidx[np.argsort(fids[fidx])[::-1]]
@@ -106,7 +108,7 @@ def run(queries=None, k=8, verbose=True):
 
     if pct == 1.0:
         verdict = "cos2"
-        verdict_text = "VERDICT: It's cos\u00b2. The phase adds no discrimination."
+        verdict_text = "VERDICT: It\u2019s cos\u00b2. The phase adds no discrimination."
     elif pct >= 0.8:
         verdict = "mostly_cos2"
         verdict_text = "VERDICT: Mostly cos\u00b2. Phase causes minor reranking."
