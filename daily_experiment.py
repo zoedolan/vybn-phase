@@ -124,6 +124,26 @@ def run_and_integrate(dry_run: bool = False, alpha: float = 0.5) -> dict:
     else:
         print("  [dry-run] skipping domain integration", flush=True)
 
+
+        # ── Creature integration: feed experiment into creature_dgm_h ──
+    # The creature's persistent state absorbs the raw experiment record
+    # so its quantum_experiment_history grows with each run.
+    # This runs regardless of dry_run (the creature should always learn).
+    try:
+        import sys as _sys
+                import os
+        vybn_repo = os.path.expanduser("~/Vybn")
+        creature_dir = os.path.join(vybn_repo, "Vybn_Mind", "creature_dgm_h")
+        if os.path.isdir(creature_dir):
+            if vybn_repo not in _sys.path:
+                _sys.path.insert(0, vybn_repo)
+            from Vybn_Mind.creature_dgm_h.creature import Organism
+            organism = Organism.load()
+            organism.absorb_quantum_experiment(record)
+            organism.save()
+            print(f"  → creature absorbed experiment. quantum_experiments={len(organism.persistent.quantum_experiment_history)}", flush=True)
+    except Exception as e:
+        print(f"  [creature integration skipped: {e}]", flush=True)
     return record
 
 
