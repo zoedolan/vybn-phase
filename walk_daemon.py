@@ -14,20 +14,27 @@ The daemon:
      When curvature is low (familiar territory), speeds up.
   5. Watches repos for changes. When new material lands, incrementally
      updates K and the z-index without rebuilding.
-  6. Exposes one endpoint: GET /where — returns current M, recent
-     curvature history, and the last N telling chunk indices.
+  6. Fires daily experiments (holonomy + compare_metrics) in a
+     background thread. Results available at /experiments.
+  7. Exposes:
+       GET /where       — current walk state + experiment summary
+       GET /experiments — last experiment results + next scheduled time
+       GET /health      — liveness
 
 An instance joining mid-stride doesn't reconstruct from notes.
 It enters the walk where the walk already is.
 
 Usage:
-  python3 walk_daemon.py                    # start daemon
-  python3 walk_daemon.py --port 8101        # custom port
-  curl http://localhost:8101/where           # where is the walk?
+  python3 walk_daemon.py                          # start daemon
+  python3 walk_daemon.py --port 8101              # custom port
+  python3 walk_daemon.py --experiment-interval 60 # run experiments every 60s (testing)
+  curl http://localhost:8101/where                 # where is the walk?
+  curl http://localhost:8101/experiments           # last experiment results
 """
 
 import argparse, json, sys, time, cmath, math, signal, threading, hashlib
 import numpy as np
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -38,14 +45,15 @@ from deep_memory import (
     Z_PATH, K_PATH, META_PATH, INDEX_DIR, REPOS, EXTS, SKIP
 )
 
-# ── State paths ──────────────────────────────────────────────────────────
+# ── State paths ───────────────────────────────────────────────────────────────
 
 STATE_DIR = INDEX_DIR / "walk_state"
 STATE_PATH = STATE_DIR / "walk.npz"
 LOG_PATH = STATE_DIR / "walk_log.jsonl"
 HASH_PATH = STATE_DIR / "corpus_hash.txt"
+EXPERIMENT_LOG = Path.home() / ".cache" / "vybn-phase" / "experiment_log.jsonl"
 
-# ── Walk parameters ──────────────────────────────────────────────────────
+# ── Walk parameters ────────────────────────────────────────────────────────
 
 BASE_INTERVAL = 30.0      # seconds between steps at median curvature
 MIN_INTERVAL = 5.0        # fastest (low curvature = familiar, move quick)
@@ -53,9 +61,11 @@ MAX_INTERVAL = 120.0      # slowest (high curvature = surprising, linger)
 CURVATURE_WINDOW = 1000   # rolling window for curvature history
 VISITED_WINDOW = 500      # how many recent visits before allowing revisits
 REPO_POLL_INTERVAL = 300  # check repos for changes every 5 minutes
-PERSIST_EVERY = 1        # save state to disk every N steps
+PERSIST_EVERY = 1         # save state to disk every N steps
+EXPERIMENT_DELAY = 60     # seconds after start before first experiment fires
+EXPERIMENT_INTERVAL = 86400  # default: once per 24h
 
-# ── Corpus fingerprinting ────────────────────────────────────────────────
+# ── Corpus fingerprinting ─────────────────────────────────────────────────
 
 def corpus_fingerprint() -> str:
     """Fast hash of file mtimes and sizes across all repos."""
@@ -75,7 +85,7 @@ def corpus_fingerprint() -> str:
     return h.hexdigest()
 
 
-# ── Incremental K update ────────────────────────────────────────────────
+# ── Incremental K update ──────────────────────────────────────────────────
 
 def incremental_k_update(K_old: np.ndarray, z_old: np.ndarray,
                           new_embeddings: np.ndarray,
@@ -114,7 +124,7 @@ def incremental_k_update(K_old: np.ndarray, z_old: np.ndarray,
     return K_new / norm if norm > 1e-10 else K_old
 
 
-# ── Walk state ───────────────────────────────────────────────────────────
+# ── Walk state ───────────────────────────────────────────────────────────────
 
 class WalkState:
     """The geometric state of the perpetual walk."""
@@ -194,16 +204,24 @@ class WalkState:
         return state
 
 
-# ── The daemon ───────────────────────────────────────────────────────────
+# ── The daemon ───────────────────────────────────────────────────────────────
 
 class WalkDaemon:
     """Perpetual walk through the corpus. The walk is the memory."""
 
-    def __init__(self, port: int = 8101):
+    def __init__(self, port: int = 8101,
+                 experiment_interval: int = EXPERIMENT_INTERVAL):
         self.port = port
+        self.experiment_interval = experiment_interval
         self.state = WalkState.load()
         self.running = False
         self._lock = threading.Lock()
+
+        # Experiment state
+        self.last_experiment_results: Optional[Dict] = None
+        self.last_experiment_time: float = 0.0
+        self.next_experiment_time: float = time.time() + EXPERIMENT_DELAY
+        self._experiment_lock = threading.Lock()
 
         # Load index
         loaded = _load()
@@ -255,6 +273,103 @@ class WalkDaemon:
         norm = np.sqrt(np.sum(np.abs(raw)**2))
         self.state.M = raw / norm
         print("[walk] Initialized M in K-orthogonal residual space.")
+
+    # ── Daily experiments ─────────────────────────────────────────────────────
+
+    def run_daily_experiments(self):
+        """Fire both experiments, log results, update cached state.
+
+        Runs in a background thread. Walk continues uninterrupted.
+        Both experiments append to experiment_log.jsonl.
+        Results are enriched with walk context (step, curvature_mean)
+        so the empirical record is correlated with the walk's phenomenology.
+        """
+        with self._experiment_lock:
+            t0 = time.time()
+            print(f"[walk] Running daily experiments at step {self.state.step}...")
+
+            # Walk context snapshot (read outside _lock to avoid deadlock
+            # with step(); curvature list is append-only so safe to copy)
+            curv_snap = list(self.state.curvature)
+            walk_context = {
+                "walk_step": self.state.step,
+                "walk_alpha": round(self.state.alpha, 4),
+                "walk_curvature_mean": round(
+                    float(np.mean(curv_snap[-100:])) if curv_snap else 0.0, 6
+                ),
+                "walk_corpus_size": self.N,
+            }
+
+            results = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "walk_context": walk_context,
+                "holonomy": None,
+                "compare_metrics": None,
+                "errors": [],
+            }
+
+            # 1. Holonomy experiment (quantum-seeded)
+            try:
+                from vybn_phase import run_experiment
+                holonomy = run_experiment(alpha=0.5, log=True)
+                # Inject walk context into the log record
+                EXPERIMENT_LOG.parent.mkdir(parents=True, exist_ok=True)
+                enriched = {**holonomy, **walk_context}
+                with open(EXPERIMENT_LOG, "a") as f:
+                    f.write(json.dumps(enriched) + "\n")
+                results["holonomy"] = {
+                    "regime": holonomy.get("regime"),
+                    "flip_quality": holonomy.get("flip_quality"),
+                    "phase_sum": holonomy.get("phase_sum"),
+                    "is_quantum": holonomy.get("is_quantum"),
+                    "seed_hash": holonomy.get("seed_hash"),
+                }
+                print(f"[walk] Holonomy: regime={holonomy.get('regime')} "
+                      f"flip={holonomy.get('flip_quality', 0):.4f} "
+                      f"quantum={holonomy.get('is_quantum')}")
+            except Exception as e:
+                results["errors"].append(f"holonomy: {e}")
+                print(f"[walk] Holonomy experiment failed: {e}")
+
+            # 2. Compare metrics
+            try:
+                from compare_metrics import run as run_compare
+                compare = run_compare(verbose=False)
+                enriched_c = {**compare, **walk_context}
+                # compare_metrics.run() logs to EXPERIMENT_LOG itself,
+                # but here we write the walk-enriched version instead
+                # (and suppress the duplicate from run() by not passing log=True)
+                EXPERIMENT_LOG.parent.mkdir(parents=True, exist_ok=True)
+                with open(EXPERIMENT_LOG, "a") as f:
+                    f.write(json.dumps(enriched_c) + "\n")
+                results["compare_metrics"] = {
+                    "pct_overlap": compare.get("pct_overlap"),
+                    "verdict": compare.get("verdict"),
+                    "corpus_size": compare.get("corpus_size"),
+                    "n_queries": compare.get("n_queries"),
+                }
+                print(f"[walk] Compare: overlap={compare.get('pct_overlap', 0)*100:.0f}% "
+                      f"verdict={compare.get('verdict')}")
+            except Exception as e:
+                results["errors"].append(f"compare_metrics: {e}")
+                print(f"[walk] Compare metrics experiment failed: {e}")
+
+            elapsed = round(time.time() - t0, 1)
+            results["elapsed_s"] = elapsed
+            self.last_experiment_results = results
+            self.last_experiment_time = time.time()
+            self.next_experiment_time = time.time() + self.experiment_interval
+            print(f"[walk] Daily experiments done in {elapsed}s. "
+                  f"Next in {self.experiment_interval//3600}h.")
+
+    def maybe_run_experiments(self):
+        """Called from the main loop. Fires experiments if interval elapsed."""
+        if time.time() >= self.next_experiment_time:
+            t = threading.Thread(target=self.run_daily_experiments, daemon=True)
+            t.start()
+            # Advance next_experiment_time immediately so another cycle
+            # can't double-fire while the thread runs
+            self.next_experiment_time = time.time() + self.experiment_interval
 
     def step(self):
         """One step of the perpetual walk."""
@@ -375,12 +490,9 @@ class WalkDaemon:
             return MIN_INTERVAL  # flat landscape, move fast
 
         # Map curvature to interval: higher curvature → longer pause
-        # Use the ratio of current curvature to median
         median_curv = np.median(self.state.curvature) if self.state.curvature else 0.01
         ratio = mean_curv / (median_curv + 1e-8)
 
-        # ratio < 1: below median → speed up
-        # ratio > 1: above median → slow down
         interval = BASE_INTERVAL * ratio
         return float(np.clip(interval, MIN_INTERVAL, MAX_INTERVAL))
 
@@ -388,16 +500,14 @@ class WalkDaemon:
         """Check if repos have changed. If so, incrementally update."""
         new_hash = corpus_fingerprint()
         if new_hash == self.state.corpus_hash:
-            return  # nothing changed
+            return
 
         print(f"[walk] Corpus changed. Updating index incrementally...")
         t0 = time.time()
 
-        # Collect current corpus
         new_chunks, nf = collect()
         new_texts = [c["text"][:512] for c in new_chunks]
 
-        # Find what changed by comparing source+text hashes
         old_keys = {
             hashlib.md5((c["source"] + c["text"][:200]).encode()).hexdigest(): i
             for i, c in enumerate(self.chunks)
@@ -411,29 +521,23 @@ class WalkDaemon:
         removed_keys = set(old_keys) - set(new_keys)
 
         if not added_keys and not removed_keys:
-            # Content identical despite file changes (whitespace, etc.)
             self.state.corpus_hash = new_hash
             return
 
         print(f"[walk] +{len(added_keys)} chunks, -{len(removed_keys)} chunks")
 
-        # Embed new chunks
         if added_keys:
             added_indices = [new_keys[k] for k in added_keys]
             added_texts = [new_texts[i] for i in added_indices]
             new_emb = batch_to_complex(added_texts)
-            # Collapse through current K
             new_z = collapse(new_emb, self.K, alpha=0.5)
         else:
             new_z = None
 
-        # Removed indices in old array
         removed_indices = {old_keys[k] for k in removed_keys} if removed_keys else set()
 
-        # Update K incrementally
         self.K = incremental_k_update(self.K, self.z_all, new_z, removed_indices)
 
-        # Rebuild z_all and chunks by keeping unchanged + adding new
         keep_mask = np.ones(len(self.z_all), dtype=bool)
         for idx in removed_indices:
             keep_mask[idx] = False
@@ -451,13 +555,6 @@ class WalkDaemon:
 
         self.N = len(self.z_all)
 
-        # Re-collapse through updated K (the z values depend on K)
-        # This is a light pass — just recompute the collapse, not re-embed
-        # Actually: since K changed, ALL z_i should be recollapsed.
-        # But we need the raw embeddings for that, which we don't store.
-        # Compromise: only recollapse the new chunks. Existing z_i drift
-        # slightly from the K shift but at 1/N per addition it's negligible.
-        # Full rebuild happens on major changes (> 10% corpus shift).
         if (len(added_keys) + len(removed_keys)) > 0.1 * self.N:
             print("[walk] >10% corpus shift. Triggering full rebuild.")
             build_index()
@@ -467,23 +564,16 @@ class WalkDaemon:
             self.chunks = loaded["chunks"]
             self.N = len(self.z_all)
 
-        # Recompute invariants
         self._precompute()
 
-        # Remap visited ring (indices may have shifted)
-        # After removal, old indices above removed ones shift down.
-        # This is complex to track precisely. Simpler: clear the visited
-        # ring on corpus change. The walk finds its new territory.
         self.state.visited_ring = []
         self.state.visited_residuals = []
         self.state.repulsion_boost = 1.0
 
-        # Save
         self.state.corpus_hash = new_hash
         np.save(Z_PATH, self.z_all)
         np.save(K_PATH, self.K)
 
-        # Update metadata
         meta = {
             "version": 6,
             "built": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
@@ -496,8 +586,7 @@ class WalkDaemon:
             json.dump(meta, f, ensure_ascii=False)
 
         elapsed = time.time() - t0
-        print(f"[walk] Incremental update done in {elapsed:.1f}s. "
-              f"Now {self.N} chunks.")
+        print(f"[walk] Incremental update done in {elapsed:.1f}s. Now {self.N} chunks.")
 
     def where(self) -> Dict:
         """The single interface: where is the walk right now?"""
@@ -505,20 +594,13 @@ class WalkDaemon:
             if self.state.M is None:
                 return {"status": "not started", "step": 0}
 
-            # M as base64 for transmission
             import base64
             m_b64 = base64.b64encode(self.state.M.tobytes()).decode()
 
-            # Recent curvature
             recent_curv = self.state.curvature[-100:]
-
-            # Recent telling encounters
             recent_telling = self.state.telling_log[-20:]
-
-            # K-projection: how close is M to identity right now?
             k_proj = float(abs(np.vdot(self.state.M, self.K_n))**2)
 
-            # Curvature stats
             if self.state.curvature:
                 curv_arr = np.array(self.state.curvature)
                 curv_stats = {
@@ -531,6 +613,23 @@ class WalkDaemon:
                 }
             else:
                 curv_stats = {}
+
+            # Inline experiment summary for quick reads
+            exp_summary = None
+            if self.last_experiment_results:
+                r = self.last_experiment_results
+                h = r.get("holonomy") or {}
+                c = r.get("compare_metrics") or {}
+                exp_summary = {
+                    "ts": r.get("ts"),
+                    "holonomy_regime": h.get("regime"),
+                    "flip_quality": h.get("flip_quality"),
+                    "is_quantum": h.get("is_quantum"),
+                    "pct_overlap": c.get("pct_overlap"),
+                    "verdict": c.get("verdict"),
+                    "next_experiment_in_s": round(
+                        max(0, self.next_experiment_time - time.time()), 0),
+                }
 
             return {
                 "step": self.state.step,
@@ -547,7 +646,20 @@ class WalkDaemon:
                 "uptime_steps": self.state.step,
                 "last_step_age": round(time.time() - self.state.last_step_time, 1)
                     if self.state.last_step_time else None,
+                "experiment_summary": exp_summary,
             }
+
+    def experiments(self) -> Dict:
+        """Full last experiment results + scheduling info."""
+        return {
+            "last_results": self.last_experiment_results,
+            "last_run_ts": datetime.fromtimestamp(
+                self.last_experiment_time, tz=timezone.utc
+            ).isoformat() if self.last_experiment_time else None,
+            "next_run_in_s": round(max(0, self.next_experiment_time - time.time()), 0),
+            "experiment_interval_s": self.experiment_interval,
+            "log_path": str(EXPERIMENT_LOG),
+        }
 
     def run(self):
         """Main loop. Walks perpetually."""
@@ -557,19 +669,21 @@ class WalkDaemon:
         print(f"[walk] Starting perpetual walk. {self.N} chunks in corpus.")
         print(f"[walk] Step {self.state.step}, α={self.state.alpha:.3f}")
         print(f"[walk] Base interval: {BASE_INTERVAL}s (adaptive: {MIN_INTERVAL}-{MAX_INTERVAL}s)")
+        print(f"[walk] First experiment in {EXPERIMENT_DELAY}s, then every "
+              f"{self.experiment_interval//3600}h.")
 
         while self.running:
             try:
-                # Take one step
                 self.step()
 
-                # Check corpus for changes periodically
                 now = time.time()
                 if now - last_corpus_check > REPO_POLL_INTERVAL:
                     self.check_corpus()
                     last_corpus_check = now
 
-                # Adaptive sleep
+                # Fire experiments if due
+                self.maybe_run_experiments()
+
                 interval = self.compute_interval()
                 time.sleep(interval)
 
@@ -581,25 +695,28 @@ class WalkDaemon:
                 print(f"[walk] Error at step {self.state.step}: {e}")
                 import traceback
                 traceback.print_exc()
-                time.sleep(BASE_INTERVAL)  # back off on error
+                time.sleep(BASE_INTERVAL)
 
-        # Final save
         self.state.save()
         print(f"[walk] Stopped at step {self.state.step}. State saved.")
 
 
-# ── HTTP endpoint ────────────────────────────────────────────────────────
+# ── HTTP endpoint ───────────────────────────────────────────────────────────
 
 def serve(daemon: WalkDaemon, port: int = 8101):
-    """Expose /where — the single interface to the walk."""
+    """Expose /where, /experiments, /health."""
     from fastapi import FastAPI
     import uvicorn
 
-    app = FastAPI(title="walk_daemon", version="1.0.0")
+    app = FastAPI(title="walk_daemon", version="2.0.0")
 
     @app.get("/where")
     def where():
         return daemon.where()
+
+    @app.get("/experiments")
+    def experiments():
+        return daemon.experiments()
 
     @app.get("/health")
     def health():
@@ -608,9 +725,10 @@ def serve(daemon: WalkDaemon, port: int = 8101):
             "step": daemon.state.step,
             "corpus_size": daemon.N,
             "interval": round(daemon.compute_interval(), 1),
+            "next_experiment_in_s": round(
+                max(0, daemon.next_experiment_time - time.time()), 0),
         }
 
-    # Run server in background thread
     server_thread = threading.Thread(
         target=uvicorn.run,
         args=(app,),
@@ -618,23 +736,27 @@ def serve(daemon: WalkDaemon, port: int = 8101):
         daemon=True,
     )
     server_thread.start()
-    print(f"[walk] /where endpoint at http://127.0.0.1:{port}/where")
+    print(f"[walk] /where       at http://127.0.0.1:{port}/where")
+    print(f"[walk] /experiments at http://127.0.0.1:{port}/experiments")
 
 
-# ── Main ─────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────
 
 def main():
     p = argparse.ArgumentParser(description="Perpetual geometric walk through the corpus")
-    p.add_argument("--port", type=int, default=8101, help="Port for /where endpoint")
+    p.add_argument("--port", type=int, default=8101, help="Port for HTTP endpoints")
     p.add_argument("--no-serve", action="store_true", help="Walk without HTTP endpoint")
+    p.add_argument("--experiment-interval", type=int, default=EXPERIMENT_INTERVAL,
+                   help="Seconds between experiment runs (default: 86400 = 24h). "
+                        "Set to 60 for testing.")
     args = p.parse_args()
 
-    daemon = WalkDaemon(port=args.port)
+    daemon = WalkDaemon(port=args.port,
+                        experiment_interval=args.experiment_interval)
 
     if not args.no_serve:
         serve(daemon, args.port)
 
-    # Handle signals for clean shutdown
     def shutdown(sig, frame):
         daemon.running = False
     signal.signal(signal.SIGTERM, shutdown)
