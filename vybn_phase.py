@@ -161,6 +161,7 @@ def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> tuple[np.n
             raise RuntimeError("No IBM Quantum token env var set")
         from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
         from qiskit import QuantumCircuit
+        from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
         kwargs = {"channel": creds["channel"], "token": creds["token"]}
         if creds["instance"]:
@@ -176,6 +177,8 @@ def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> tuple[np.n
         qc.h(0)
         qc.measure(0, 0)
 
+        pm = generate_preset_pass_manager(optimization_level=1, backend=backend)
+        qc = pm.run(qc)
         sampler = Sampler(mode=backend)
         total_shots = max(n * 8, 256)
         job = sampler.run([qc], shots=total_shots)
