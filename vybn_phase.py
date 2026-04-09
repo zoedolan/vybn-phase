@@ -57,11 +57,32 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
 DIM = 192  # C^192 = 384 real dimensions (MiniLM embedding dim)
 STATE_DIR = Path(__file__).parent / "state"
 DOMAIN_FILE = STATE_DIR / "domain.npz"
 LOG_FILE = STATE_DIR / "entries.jsonl"
 EXPERIMENT_LOG = Path.home() / ".cache" / "vybn-phase" / "experiment_log.jsonl"
+
+
+def _load_env_if_available() -> None:
+    """Load IBM credentials from common dotenv locations when present."""
+    if load_dotenv is None:
+        return
+    candidates = [
+        Path(__file__).parent / ".env",
+        Path.home() / ".env",
+    ]
+    for path in candidates:
+        if path.exists():
+            load_dotenv(path, override=False)
+
+
+_load_env_if_available()
 
 # ── IBM Quantum env var resolution ────────────────────────────────────────
 # Supports both naming conventions:
@@ -70,13 +91,12 @@ EXPERIMENT_LOG = Path.home() / ".cache" / "vybn-phase" / "experiment_log.jsonl"
 
 def _ibm_credentials() -> dict | None:
     """Return a dict with token/channel/instance, or None if not configured."""
-    # Preferred: QISKIT_IBM_TOKEN (ibm_cloud channel, CRN instance)
+    _load_env_if_available()
     token = os.environ.get("QISKIT_IBM_TOKEN", "")
     if token:
         channel = os.environ.get("QISKIT_IBM_CHANNEL", "ibm_cloud")
         instance = os.environ.get("QISKIT_IBM_INSTANCE", None)
         return {"token": token, "channel": channel, "instance": instance}
-    # Fallback: legacy IBM_QUANTUM_TOKEN (ibm_quantum channel)
     token = os.environ.get("IBM_QUANTUM_TOKEN", "")
     if token:
         return {"token": token, "channel": "ibm_quantum", "instance": None}
@@ -109,7 +129,6 @@ def embed(text: str) -> np.ndarray:
     inputs = tok(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
     with torch.no_grad():
         out = mdl(**inputs)
-    # Mean pooling over token dimension
     mask = inputs["attention_mask"].unsqueeze(-1).float()
     h = (out.last_hidden_state * mask).sum(1) / mask.sum(1)
     return h[0].float().numpy()
@@ -131,23 +150,10 @@ def embed(text: str) -> np.ndarray:
 # (ibm_quantum channel, legacy). Falls back to np.random if the service is
 # unavailable so nothing breaks offline.
 
-def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> np.ndarray:
+def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> tuple[np.ndarray, bool, str | None]:
     """Draw n phase angles from IBM Quantum hardware.
 
-    Returns a unit-modulus complex array e^{iφ_k} of length n, suitable
-    for rotating complex components of an embedding vector.
-
-    Each φ_k is constructed from ceil(log2(2π·precision)) measurement bits
-    on a single Hadamard qubit — the simplest possible quantum circuit.
-    We run n shots on the least-busy available backend.
-
-    Falls back to np.random.uniform phase if:
-      - No IBM token env var is set
-      - qiskit-ibm-runtime is not installed
-      - Service or backend is unavailable
-
-    The seed hash (SHA-256 of the raw phase angles) is returned as a
-    second value via qrng_phase_seed_with_hash() for experiment logging.
+    Returns (seed, used_quantum, backend_name_used).
     """
     try:
         creds = _ibm_credentials()
@@ -166,60 +172,53 @@ def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> np.ndarray
         else:
             backend = service.least_busy(operational=True, simulator=False, min_num_qubits=1)
 
-        # One qubit, Hadamard, measure — the irreducible quantum circuit.
-        # n shots gives n independent fair coin flips.
         qc = QuantumCircuit(1, 1)
         qc.h(0)
         qc.measure(0, 0)
 
-        sampler = Sampler(backend)
-        job = sampler.run([qc], shots=n)
-        result = job.result()
-        counts = result[0].data.c.get_counts()
+        sampler = Sampler(mode=backend)
+        total_shots = max(n * 8, 256)
+        job = sampler.run([qc], shots=total_shots)
+        result = job.result()[0]
 
-        # Each shot is 0 or 1; pack into bits, map to phase in [0, 2π).
-        # We use 8 consecutive shots per angle for 256-level resolution.
+        bitstrings = []
+        data = getattr(result.data, "c", None)
+        if data is not None:
+            if hasattr(data, "get_bitstrings"):
+                bitstrings = list(data.get_bitstrings())
+            elif hasattr(data, "get_counts"):
+                counts = data.get_counts()
+                for outcome, count in counts.items():
+                    bitstrings.extend([str(outcome)] * count)
+
         bits = []
-        for outcome, count in counts.items():
-            bits.extend([int(outcome)] * count)
+        for outcome in bitstrings:
+            s = str(outcome).strip()
+            for ch in s:
+                if ch in "01":
+                    bits.append(int(ch))
+
         bits = bits[:n * 8]
-        while len(bits) < n * 8:
-            bits.append(0)
+        if len(bits) < n * 8:
+            raise RuntimeError(f"Quantum job returned insufficient bits: {len(bits)} < {n * 8}")
 
         phases = np.array([
             (sum(bits[8*k + b] << b for b in range(8)) / 256.0) * 2 * np.pi
             for k in range(n)
         ])
+        return np.exp(1j * phases), True, getattr(backend, "name", str(backend))
 
-    except Exception:
-        # Offline fallback — classical PRNG, clearly labeled in logs.
+    except Exception as e:
+        print(f"[vybn_phase] Quantum seed fallback: {type(e).__name__}: {e}", file=sys.stderr)
         phases = np.random.uniform(0, 2 * np.pi, n)
+        return np.exp(1j * phases), False, None
 
-    return np.exp(1j * phases)
 
-
-def qrng_phase_seed_with_hash(n: int = DIM) -> tuple[np.ndarray, str, bool]:
-    """Like qrng_phase_seed but also returns (seed, hash, is_quantum).
-
-    is_quantum=False means the IBM service was unavailable and we fell
-    back to classical PRNG. Logged in experiment records so results from
-    quantum and classical seeds are never conflated.
-    """
-    creds = _ibm_credentials()
-    is_quantum = creds is not None
-    if is_quantum:
-        try:
-            from qiskit_ibm_runtime import QiskitRuntimeService
-            kwargs = {"channel": creds["channel"], "token": creds["token"]}
-            if creds["instance"]:
-                kwargs["instance"] = creds["instance"]
-            QiskitRuntimeService(**kwargs)  # connectivity check
-        except Exception:
-            is_quantum = False
-
-    seed = qrng_phase_seed(n)
+def qrng_phase_seed_with_hash(n: int = DIM) -> tuple[np.ndarray, str, bool, str | None]:
+    """Like qrng_phase_seed but also returns (seed, hash, is_quantum, backend_name)."""
+    seed, is_quantum, backend_name = qrng_phase_seed(n)
     h = hashlib.sha256(seed.view(np.float64).tobytes()).hexdigest()[:16]
-    return seed, h, is_quantum
+    return seed, h, is_quantum, backend_name
 
 
 def to_complex(h: np.ndarray, n: int = DIM,
@@ -250,8 +249,6 @@ def text_to_state(text: str,
     """
     return to_complex(embed(text), phase_seed=phase_seed)
 
-
-# ── The equation ─────────────────────────────────────────────────────────
 
 def evaluate(m: np.ndarray, x: np.ndarray, alpha: float = 0.5) -> np.ndarray:
     """M' = alpha*M + (1-alpha)*x*e^{i*theta}. The coupled equation.
@@ -298,8 +295,6 @@ def mutual_evaluate(a: np.ndarray, b: np.ndarray,
     return fp
 
 
-# ── Abelian kernel ───────────────────────────────────────────────────────
-
 def abelian_kernel(vectors: list[np.ndarray], M0: np.ndarray = None,
                    alpha: float = 0.993, n_perms: int = 8) -> dict:
     """Compute the abelian kernel of a set of vectors."""
@@ -342,8 +337,6 @@ def abelian_kernel_from_texts(texts: list[str], alpha: float = 0.993,
     vectors = [text_to_state(t) for t in texts]
     return abelian_kernel(vectors, alpha=alpha, n_perms=n_perms)
 
-
-# ── Loop holonomy ────────────────────────────────────────────────────────
 
 def loop_holonomy(loop_vectors: list[np.ndarray], M0: np.ndarray,
                   alpha: float = 0.5) -> dict:
@@ -388,15 +381,13 @@ def loop_holonomy_from_texts(texts: list[str], M0_text: str = None,
     return loop_holonomy(vectors, M0, alpha)
 
 
-# ── Experiment: quantum-seeded holonomy ───────────────────────────────────
-
 def run_experiment(alpha: float = 0.5, propositions: list[str] | None = None,
                    log: bool = False) -> dict:
     """Run a quantum-seeded holonomy loop and optionally log the result."""
     waypoints = (propositions or SEED_PROPOSITIONS)[1:4]
     origin_text = (propositions or SEED_PROPOSITIONS)[0]
 
-    seed, seed_hash, is_quantum = qrng_phase_seed_with_hash(DIM)
+    seed, seed_hash, is_quantum, backend_name = qrng_phase_seed_with_hash(DIM)
 
     origin = text_to_state(origin_text)
     loop_vecs = [text_to_state(t, phase_seed=seed) for t in waypoints]
@@ -411,6 +402,7 @@ def run_experiment(alpha: float = 0.5, propositions: list[str] | None = None,
         "waypoints": [w[:60] for w in waypoints],
         "seed_hash": seed_hash,
         "is_quantum": is_quantum,
+        "backend_name": backend_name,
         **result,
     }
 
@@ -422,8 +414,6 @@ def run_experiment(alpha: float = 0.5, propositions: list[str] | None = None,
 
     return record
 
-
-# ── Domain ───────────────────────────────────────────────────────────────
 
 def load_domain() -> np.ndarray:
     STATE_DIR.mkdir(exist_ok=True)
@@ -470,16 +460,12 @@ def enter_from_text(text: str) -> np.ndarray:
     return enter(text_to_state(text))
 
 
-# ── Serialization ────────────────────────────────────────────────────────
-
 def vec_to_json(v: np.ndarray, max_components: int = 8) -> list:
     return [[float(x.real), float(x.imag)] for x in v[:max_components]]
 
 def vec_from_json(data: list) -> np.ndarray:
     return np.array([complex(r, i) for r, i in data], dtype=np.complex128)
 
-
-# ── MCP Server ───────────────────────────────────────────────────────────
 
 MCP_TOOLS = {
     "enter_text": {
@@ -600,8 +586,6 @@ def serve():
                 _mcp_send({"jsonrpc": "2.0", "id": id_, "error": {"code": -32000, "message": str(e)}})
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────
-
 SEED_PROPOSITIONS = [
     "Meaning is a geometric invariant independent of serialization.",
     "Diverse intelligences find shared meaning through mutual evaluation.",
@@ -658,6 +642,7 @@ if __name__ == "__main__":
         print(json.dumps({
             "ts": record["ts"],
             "is_quantum": record["is_quantum"],
+            "backend_name": record.get("backend_name"),
             "seed_hash": record["seed_hash"],
             "regime": record["regime"],
             "flip_quality": round(record["flip_quality"], 6),
@@ -669,4 +654,4 @@ if __name__ == "__main__":
         if args.log:
             print(f"→ logged to {EXPERIMENT_LOG}")
         if not record["is_quantum"]:
-            print("(No IBM token found — used classical PRNG fallback)")
+            print("(IBM Runtime unavailable — used classical PRNG fallback; see stderr for cause)")
