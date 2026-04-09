@@ -63,6 +63,25 @@ DOMAIN_FILE = STATE_DIR / "domain.npz"
 LOG_FILE = STATE_DIR / "entries.jsonl"
 EXPERIMENT_LOG = Path.home() / ".cache" / "vybn-phase" / "experiment_log.jsonl"
 
+# ── IBM Quantum env var resolution ────────────────────────────────────────
+# Supports both naming conventions:
+#   QISKIT_IBM_TOKEN / QISKIT_IBM_CHANNEL / QISKIT_IBM_INSTANCE  (ibm_cloud)
+#   IBM_QUANTUM_TOKEN                                              (ibm_quantum, legacy)
+
+def _ibm_credentials() -> dict | None:
+    """Return a dict with token/channel/instance, or None if not configured."""
+    # Preferred: QISKIT_IBM_TOKEN (ibm_cloud channel, CRN instance)
+    token = os.environ.get("QISKIT_IBM_TOKEN", "")
+    if token:
+        channel = os.environ.get("QISKIT_IBM_CHANNEL", "ibm_cloud")
+        instance = os.environ.get("QISKIT_IBM_INSTANCE", None)
+        return {"token": token, "channel": channel, "instance": instance}
+    # Fallback: legacy IBM_QUANTUM_TOKEN (ibm_quantum channel)
+    token = os.environ.get("IBM_QUANTUM_TOKEN", "")
+    if token:
+        return {"token": token, "channel": "ibm_quantum", "instance": None}
+    return None
+
 
 # ── Encoding ─────────────────────────────────────────────────────────────
 # Uses sentence-transformers (all-MiniLM-L6-v2) for semantic embeddings.
@@ -108,8 +127,9 @@ def embed(text: str) -> np.ndarray:
 # seeded walks through the same corpus should diverge measurably if the phase
 # geometry is doing independent work. compare_metrics.py logs the divergence.
 #
-# IBM_QUANTUM_TOKEN env var must be set. Falls back to np.random if the
-# service is unavailable so nothing breaks offline.
+# Reads QISKIT_IBM_TOKEN (ibm_cloud channel, preferred) or IBM_QUANTUM_TOKEN
+# (ibm_quantum channel, legacy). Falls back to np.random if the service is
+# unavailable so nothing breaks offline.
 
 def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> np.ndarray:
     """Draw n phase angles from IBM Quantum hardware.
@@ -122,7 +142,7 @@ def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> np.ndarray
     We run n shots on the least-busy available backend.
 
     Falls back to np.random.uniform phase if:
-      - IBM_QUANTUM_TOKEN is not set
+      - No IBM token env var is set
       - qiskit-ibm-runtime is not installed
       - Service or backend is unavailable
 
@@ -130,17 +150,20 @@ def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> np.ndarray
     second value via qrng_phase_seed_with_hash() for experiment logging.
     """
     try:
-        token = os.environ.get("IBM_QUANTUM_TOKEN", "")
-        if not token:
-            raise RuntimeError("IBM_QUANTUM_TOKEN not set")
+        creds = _ibm_credentials()
+        if not creds:
+            raise RuntimeError("No IBM Quantum token env var set")
         from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
         from qiskit import QuantumCircuit
 
-        service = QiskitRuntimeService(channel="ibm_quantum", token=token)
+        kwargs = {"channel": creds["channel"], "token": creds["token"]}
+        if creds["instance"]:
+            kwargs["instance"] = creds["instance"]
+        service = QiskitRuntimeService(**kwargs)
+
         if backend_name:
             backend = service.backend(backend_name)
         else:
-            # Least-busy real device with >= 1 qubit
             backend = service.least_busy(operational=True, simulator=False, min_num_qubits=1)
 
         # One qubit, Hadamard, measure — the irreducible quantum circuit.
@@ -159,9 +182,9 @@ def qrng_phase_seed(n: int = DIM, backend_name: str | None = None) -> np.ndarray
         bits = []
         for outcome, count in counts.items():
             bits.extend([int(outcome)] * count)
-        bits = bits[:n * 8]  # trim to exactly what we need
+        bits = bits[:n * 8]
         while len(bits) < n * 8:
-            bits.append(0)  # pad if shots < n*8 (shouldn't happen)
+            bits.append(0)
 
         phases = np.array([
             (sum(bits[8*k + b] << b for b in range(8)) / 256.0) * 2 * np.pi
@@ -182,15 +205,17 @@ def qrng_phase_seed_with_hash(n: int = DIM) -> tuple[np.ndarray, str, bool]:
     back to classical PRNG. Logged in experiment records so results from
     quantum and classical seeds are never conflated.
     """
-    token = os.environ.get("IBM_QUANTUM_TOKEN", "")
-    is_quantum = bool(token)
-    try:
-        if not is_quantum:
-            raise RuntimeError("no token")
-        from qiskit_ibm_runtime import QiskitRuntimeService
-        QiskitRuntimeService(channel="ibm_quantum", token=token)  # connectivity check
-    except Exception:
-        is_quantum = False
+    creds = _ibm_credentials()
+    is_quantum = creds is not None
+    if is_quantum:
+        try:
+            from qiskit_ibm_runtime import QiskitRuntimeService
+            kwargs = {"channel": creds["channel"], "token": creds["token"]}
+            if creds["instance"]:
+                kwargs["instance"] = creds["instance"]
+            QiskitRuntimeService(**kwargs)  # connectivity check
+        except Exception:
+            is_quantum = False
 
     seed = qrng_phase_seed(n)
     h = hashlib.sha256(seed.view(np.float64).tobytes()).hexdigest()[:16]
@@ -274,22 +299,10 @@ def mutual_evaluate(a: np.ndarray, b: np.ndarray,
 
 
 # ── Abelian kernel ───────────────────────────────────────────────────────
-# The convergent state of a set of propositions, independent of order.
-# Run the encounter sequence many times in different permutations;
-# the result converges to the abelian kernel — the geometric invariant
-# that survives after path-dependent information is suppressed.
-#
-# April 5, 2026: confirmed numerically. At α=0.993, permutations of
-# 50 propositions converge to fidelity 0.99999766 in C^4.
 
 def abelian_kernel(vectors: list[np.ndarray], M0: np.ndarray = None,
                    alpha: float = 0.993, n_perms: int = 8) -> dict:
-    """Compute the abelian kernel of a set of vectors.
-
-    Runs n_perms random permutations of the encounter sequence and
-    returns the centroid (the path-independent invariant), plus
-    convergence diagnostics.
-    """
+    """Compute the abelian kernel of a set of vectors."""
     dim = vectors[0].shape[0]
     if M0 is None:
         M0 = vectors[0].copy()
@@ -302,12 +315,10 @@ def abelian_kernel(vectors: list[np.ndarray], M0: np.ndarray = None,
             M = evaluate(M, vectors[idx], alpha)
         finals.append(M)
 
-    # Centroid of final states = the abelian kernel
     centroid = np.mean(finals, axis=0)
     norm = np.sqrt(np.sum(np.abs(centroid)**2))
     kernel = centroid / norm if norm > 1e-10 else centroid
 
-    # Convergence: pairwise fidelities
     fids = [fidelity(finals[i], finals[j])
             for i in range(len(finals)) for j in range(i+1, len(finals))]
     fids = np.array(fids) if fids else np.array([1.0])
@@ -333,20 +344,10 @@ def abelian_kernel_from_texts(texts: list[str], alpha: float = 0.993,
 
 
 # ── Loop holonomy ────────────────────────────────────────────────────────
-# Trace a path through a sequence of states and measure the accumulated
-# geometric phase relative to the starting state. If the path is a loop
-# (returns near its start), the phase is the holonomy.
-#
-# At α → 0, holonomy shows perfect orientation reversal (Φ_fwd + Φ_rev ≈ 0).
-# At α → 1, the geometric signal is present (correlation -0.994 between
-# forward and reverse) but masked by dynamical phase.
 
 def loop_holonomy(loop_vectors: list[np.ndarray], M0: np.ndarray,
                   alpha: float = 0.5) -> dict:
-    """Run M through a sequence of encounters. Return accumulated phase.
-
-    Also runs the reversed loop and reports orientation-reversal quality.
-    """
+    """Run M through a sequence of encounters. Return accumulated phase."""
     M_fwd = M0.copy()
     for x in loop_vectors:
         M_fwd = evaluate(M_fwd, x, alpha)
@@ -388,30 +389,16 @@ def loop_holonomy_from_texts(texts: list[str], M0_text: str = None,
 
 
 # ── Experiment: quantum-seeded holonomy ───────────────────────────────────
-# Daily experiment surface. Run the seed propositions as a holonomy loop
-# with a fresh quantum seed. Log phase, flip_quality, regime, seed hash.
-# Results accumulate in experiment_log.jsonl for longitudinal analysis.
-#
-# compare_metrics.py --log appends retrieval overlap results to the same log.
-# Together they build the empirical record: does the geometry do independent
-# work, and does quantum seeding change what it finds?
 
 def run_experiment(alpha: float = 0.5, propositions: list[str] | None = None,
                    log: bool = False) -> dict:
-    """Run a quantum-seeded holonomy loop and optionally log the result.
-
-    Uses three propositions from SEED_PROPOSITIONS as the loop waypoints
-    (or a custom list). The origin is the first proposition without seed
-    so the baseline is stable; the loop vectors use the quantum seed.
-
-    Returns the full experiment record as a dict.
-    """
-    waypoints = (propositions or SEED_PROPOSITIONS)[1:4]  # skip first as origin
+    """Run a quantum-seeded holonomy loop and optionally log the result."""
+    waypoints = (propositions or SEED_PROPOSITIONS)[1:4]
     origin_text = (propositions or SEED_PROPOSITIONS)[0]
 
     seed, seed_hash, is_quantum = qrng_phase_seed_with_hash(DIM)
 
-    origin = text_to_state(origin_text)  # unseeded — stable baseline
+    origin = text_to_state(origin_text)
     loop_vecs = [text_to_state(t, phase_seed=seed) for t in waypoints]
 
     result = loop_holonomy(loop_vecs, origin, alpha=alpha)
@@ -486,7 +473,6 @@ def enter_from_text(text: str) -> np.ndarray:
 # ── Serialization ────────────────────────────────────────────────────────
 
 def vec_to_json(v: np.ndarray, max_components: int = 8) -> list:
-    """Serialize a complex vector for JSON. Truncates to max_components."""
     return [[float(x.real), float(x.imag)] for x in v[:max_components]]
 
 def vec_from_json(data: list) -> np.ndarray:
@@ -509,19 +495,19 @@ MCP_TOOLS = {
         "inputSchema": {"type": "object", "properties": {"text_a": {"type": "string"}, "text_b": {"type": "string"}}, "required": ["text_a", "text_b"]},
     },
     "abelian_kernel": {
-        "description": "Compute the abelian kernel of a set of propositions — the geometric invariant independent of encounter order. Returns the kernel vector, convergence fidelity, and operating regime (geometric / mixed / abelian-kernel).",
+        "description": "Compute the abelian kernel of a set of propositions.",
         "inputSchema": {"type": "object", "properties": {
-            "texts": {"type": "array", "items": {"type": "string"}, "description": "Propositions to find the kernel of."},
-            "alpha": {"type": "number", "description": "Memory parameter. 0.993 = creature regime (abelian). 0.5 = domain regime (geometric). Default 0.993."},
-            "n_permutations": {"type": "integer", "description": "Number of random orderings to average over. Default 8."},
+            "texts": {"type": "array", "items": {"type": "string"}},
+            "alpha": {"type": "number"},
+            "n_permutations": {"type": "integer"},
         }, "required": ["texts"]},
     },
     "loop_holonomy": {
-        "description": "Measure geometric phase around a loop of propositions. Runs the loop forward and reversed, reports accumulated phase and orientation-reversal quality. Flip quality > 50% = geometric regime. Flip quality near 0% with high correlation = dynamical regime (geometry present but masked).",
+        "description": "Measure geometric phase around a loop of propositions.",
         "inputSchema": {"type": "object", "properties": {
-            "texts": {"type": "array", "items": {"type": "string"}, "description": "Propositions forming the loop (in order)."},
-            "origin": {"type": "string", "description": "Starting state. If omitted, uses first text."},
-            "alpha": {"type": "number", "description": "Memory parameter. Lower α = more geometric. Default 0.5."},
+            "texts": {"type": "array", "items": {"type": "string"}},
+            "origin": {"type": "string"},
+            "alpha": {"type": "number"},
         }, "required": ["texts"]},
     },
     "status": {
@@ -529,10 +515,10 @@ MCP_TOOLS = {
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     "experiment": {
-        "description": "Run a quantum-seeded holonomy experiment on the seed propositions. Returns phase, flip_quality, regime, and seed hash. Set log=true to append to experiment_log.jsonl.",
+        "description": "Run a quantum-seeded holonomy experiment on the seed propositions.",
         "inputSchema": {"type": "object", "properties": {
-            "alpha": {"type": "number", "description": "Memory parameter. Default 0.5."},
-            "log": {"type": "boolean", "description": "Append result to experiment_log.jsonl."},
+            "alpha": {"type": "number"},
+            "log": {"type": "boolean"},
         }, "required": []},
     },
 }
@@ -579,9 +565,7 @@ def _mcp_dispatch(tool, args):
         return json.dumps({k: v for k, v in record.items() if k not in ("waypoints",)})
 
     elif tool == "status":
-        return json.dumps({"domain_size": domain_size(), "dim": DIM,
-                           "note": "α=0.5 for mutual evaluation (geometric regime). "
-                                   "Use abelian_kernel with α=0.993 for path-independent invariants."})
+        return json.dumps({"domain_size": domain_size(), "dim": DIM})
 
     return json.dumps({"error": f"Unknown: {tool}"})
 
@@ -601,9 +585,7 @@ def serve():
             _mcp_send({"jsonrpc": "2.0", "id": id_, "result": {
                 "protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
                 "serverInfo": {"name": "vybn-phase", "version": "2.1.0",
-                               "description": "Reflexive domain with abelian kernel, loop holonomy, "
-                                              "and quantum phase seeding. Two regimes: geometric (α→0) "
-                                              "and abelian-kernel (α→1). D ≅ D^D."}}})
+                               "description": "Reflexive domain. D ≅ D^D."}}})
         elif method == "notifications/initialized":
             pass
         elif method == "tools/list":
@@ -641,14 +623,17 @@ if __name__ == "__main__":
                         choices=["status", "enter", "seed", "serve", "experiment"])
     parser.add_argument("text", nargs="*")
     parser.add_argument("--alpha", type=float, default=0.5)
-    parser.add_argument("--log", action="store_true",
-                        help="Append experiment result to experiment_log.jsonl")
+    parser.add_argument("--log", action="store_true")
     args = parser.parse_args()
 
     if args.cmd == "status":
         print(f"Domain: {domain_size()} residents in C^{DIM}")
-        token = os.environ.get("IBM_QUANTUM_TOKEN", "")
-        print(f"IBM Quantum: {'token set' if token else 'no token (will use classical fallback)'}")
+        creds = _ibm_credentials()
+        if creds:
+            print(f"IBM Quantum: token set (channel={creds['channel']}"  +
+                  (f", instance={creds['instance'][:40]}..." if creds.get('instance') else "") + ")")
+        else:
+            print("IBM Quantum: no token set (will use classical PRNG fallback)")
 
     elif args.cmd == "enter":
         text = " ".join(args.text)
@@ -684,4 +669,4 @@ if __name__ == "__main__":
         if args.log:
             print(f"→ logged to {EXPERIMENT_LOG}")
         if not record["is_quantum"]:
-            print("(IBM_QUANTUM_TOKEN not set — used classical PRNG fallback)")
+            print("(No IBM token found — used classical PRNG fallback)")
