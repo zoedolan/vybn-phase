@@ -60,7 +60,7 @@ Z_PATH     = INDEX_DIR / "deep_memory_z.npy"      # collapsed: z_i = evaluate(K,
 K_PATH     = INDEX_DIR / "deep_memory_kernel.npy"  # corpus kernel K
 META_PATH  = INDEX_DIR / "deep_memory_meta.json"
 EXTS = {".md", ".txt", ".py"}
-SKIP = {".git", "__pycache__", ".venv", "node_modules", "archive", "experiment_results"}
+SKIP = {".git", "__pycache__", ".venv", "node_modules", "archive", "experiment_results", "notebook"}
 
 _cache = None
 
