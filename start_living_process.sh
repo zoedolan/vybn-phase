@@ -1,8 +1,8 @@
 #!/bin/bash
-# Start the living process with auth.
+# Start the living process. Tailscale only — no public tunnel.
 # Usage: ./start_living_process.sh
 # Reads token from ~/.config/vybn/memory_token
-# Intended for @reboot crontab or manual restart.
+# @reboot crontab or manual restart.
 
 set -e
 
@@ -20,8 +20,6 @@ if [ -f "$PID_FILE" ]; then
     kill "$OLD_PID" 2>/dev/null || true
     sleep 2
 fi
-
-# Also kill anything else on the port
 fuser -k "$PORT/tcp" 2>/dev/null || true
 sleep 1
 
@@ -33,13 +31,9 @@ else
     echo "$(date): WARNING - no token file, running unprotected" >> "$LOG_FILE"
 fi
 
-# Start
+# Start on all interfaces (Tailscale handles network isolation)
 cd /home/vybnz69/vybn-phase
 nohup python3 deep_memory.py --serve --host 0.0.0.0 --port $PORT >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
-echo "$(date): Started PID $! on port $PORT" >> "$LOG_FILE"
-
-# Also start cloudflare tunnel
-nohup cloudflared tunnel --url http://localhost:$PORT > /tmp/cloudflared_${PORT}.log 2>&1 &
-echo "$(date): Tunnel started PID $!" >> "$LOG_FILE"
+echo "$(date): Started PID $! on port $PORT (Tailscale only, no tunnel)" >> "$LOG_FILE"
 

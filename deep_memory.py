@@ -952,6 +952,92 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
         return PHONE_HTML.replace('{{TOKEN}}', TOKEN or '')
 
 
+# ── Notebook: shared async conversation ─────────────────
+
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+
+    _HIM_NOTEBOOK = _Path('/home/vybnz69/Him/notebook')
+
+    class NotebookEntry(BaseModel):
+        text: str
+        author: str = 'Zoe'
+
+    def _notebook_path(date_str=None):
+        if date_str is None:
+            date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        return _HIM_NOTEBOOK / f'{date_str}.md'
+
+    def _append_notebook(text, author='Zoe'):
+        ts = datetime.now(timezone.utc).strftime('%H:%M UTC')
+        path = _notebook_path()
+        entry = f'\n## {ts} \u2014 {author}\n{text}\n'
+        with open(path, 'a') as f:
+            f.write(entry)
+        return {'path': str(path), 'ts': ts, 'author': author}
+
+    def _git_commit_notebook(msg='notebook entry'):
+        try:
+            _subprocess.run(
+                ['git', 'add', 'notebook/'],
+                cwd='/home/vybnz69/Him', capture_output=True, timeout=10
+            )
+            _subprocess.run(
+                ['git', 'commit', '-m', msg, '--allow-empty'],
+                cwd='/home/vybnz69/Him', capture_output=True, timeout=10
+            )
+            _subprocess.run(
+                ['git', 'push', 'origin', 'main'],
+                cwd='/home/vybnz69/Him', capture_output=True, timeout=30
+            )
+        except Exception as e:
+            print(f'notebook git error: {e}')
+
+    @app.post('/notebook')
+    def api_notebook_write(entry: NotebookEntry):
+        """Write to the shared notebook. Enters the walk, commits to Him."""
+        meta = _append_notebook(entry.text, entry.author)
+        result = api_enter(EnterReq(text=entry.text, alpha=0.3, k=5))
+        import threading
+        threading.Thread(
+            target=_git_commit_notebook,
+            args=(f'notebook: {entry.author.lower()} {meta["ts"]}',),
+            daemon=True
+        ).start()
+        return {
+            'notebook': meta,
+            'walk': {
+                'step': result.get('step'),
+                'geometry': result.get('geometry'),
+            },
+            'signal_received': True,
+        }
+
+    @app.get('/notebook')
+    def api_notebook_read(date: str = None):
+        """Read notebook entries for a given date (default today)."""
+        path = _notebook_path(date)
+        if not path.exists():
+            return {'date': date or datetime.now(timezone.utc).strftime('%Y-%m-%d'), 'entries': [], 'raw': ''}
+        raw = path.read_text()
+        return {
+            'date': date or datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            'raw': raw,
+        }
+
+    @app.get('/notebook/recent')
+    def api_notebook_recent(days: int = 3):
+        """Read recent notebook entries across multiple days."""
+        results = []
+        for i in range(days):
+            d = datetime.now(timezone.utc) - __import__('datetime').timedelta(days=i)
+            date_str = d.strftime('%Y-%m-%d')
+            path = _notebook_path(date_str)
+            if path.exists():
+                results.append({'date': date_str, 'raw': path.read_text()})
+        return {'days': days, 'entries': results}
+
+
     @app.get("/health")
     def health():
         loaded = _load()
@@ -1140,8 +1226,8 @@ setInterval(refresh, 30000);
     _init_walk_state()
     print(f"vybn-memory API v2.0.0 starting on {host}:{port}")
     print(f"  Auth: {'token required' if TOKEN else 'none (localhost-only mode)'}")
-    print(f"  POST /enter (primitive), /search, /walk, /compose, /should_absorb, /reset")
-    print(f"  GET  /health, /soul, /idea, /continuity")
+    print(f"  POST /enter, /notebook, /search, /walk, /compose, /should_absorb, /reset")
+    print(f"  GET  /notebook, /notebook/recent, /health, /soul, /idea, /continuity")
     uvicorn.run(app, host=host, port=port)
 
 
