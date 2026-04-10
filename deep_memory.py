@@ -703,7 +703,7 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
     The legacy endpoints (/search, /walk, /compose) remain for backward
     compatibility but /enter is the primitive.
     """
-    from fastapi import FastAPI, Request, HTTPException, Depends
+    from fastapi import FastAPI, Request, HTTPException, Depends, UploadFile, File
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from pydantic import BaseModel
@@ -968,6 +968,32 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
         except FileNotFoundError:
             return '<h1>notebook.html not found</h1>'
         return html.replace('{{TOKEN}}', TOKEN or '')
+
+
+# ── Transcription via Whisper ──────────────────────────────────
+
+    _whisper_model = None
+
+    def _get_whisper():
+        nonlocal _whisper_model
+        if _whisper_model is None:
+            from faster_whisper import WhisperModel
+            _whisper_model = WhisperModel('tiny', device='cpu', compute_type='int8')
+        return _whisper_model
+
+    @app.post('/transcribe')
+    async def transcribe_audio(request: Request, file: UploadFile = File(...)):
+        import tempfile
+        audio_bytes = await file.read()
+        if len(audio_bytes) < 100:
+            return {'text': ''}
+        with tempfile.NamedTemporaryFile(suffix='.webm', delete=True) as tmp:
+            tmp.write(audio_bytes)
+            tmp.flush()
+            model = _get_whisper()
+            segments, info = model.transcribe(tmp.name, language='en')
+            text = ' '.join(seg.text.strip() for seg in segments)
+        return {'text': text}
 
 
 # ── Notebook: shared async conversation ─────────────────
