@@ -78,68 +78,215 @@ var transcript=document.getElementById('transcript');
 var entriesEl=document.getElementById('entries');
 var emptyEl=document.getElementById('empty');
 var pendingText='',isRecording=false;
-var useWhisper=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
+var useWhisper=false;
 var recorder=null,audioChunks=[];
-var recognition=null;
-if(!useWhisper){
-var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-if(SR){recognition=new SR();recognition.continuous=false;recognition.interimResults=false;recognition.lang='en-US';
-recognition.onresult=function(e){var t=e.results[0]&&e.results[0][0]?e.results[0][0].transcript:'';if(t){pendingText=t;transcript.textContent=t;sendBtn.style.display='flex';}};
-recognition.onerror=function(){isRecording=false;mic.classList.remove('recording');};
-recognition.onend=function(){isRecording=false;mic.classList.remove('recording');if(pendingText)sendBtn.style.display='flex';};}}
-function holdMic(){
-if(isRecording)return;
-pendingText='';transcript.textContent='';transcript.className='transcript';sendBtn.style.display='none';
-if(useWhisper){
-navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
-var opts={};try{opts={mimeType:'audio/webm;codecs=opus'};}catch(e){}
-recorder=new MediaRecorder(stream,opts);
-audioChunks=[];
-recorder.ondataavailable=function(e){if(e.data.size>0)audioChunks.push(e.data);};
-recorder.onstop=function(){
-stream.getTracks().forEach(function(t){t.stop();});
-if(audioChunks.length===0)return;
-var blob=new Blob(audioChunks,{type:recorder.mimeType});
-transcript.textContent='transcribing...';transcript.className='transcript transcribing';
-var fd=new FormData();fd.append('file',blob,'voice.webm');
-fetch(u('/transcribe'),{method:'POST',headers:{'Authorization':'Bearer '+TK},body:fd}).then(function(r){return r.json();}).then(function(d){
-transcript.className='transcript';
-if(d.text&&d.text.trim()){pendingText=d.text.trim();transcript.textContent=pendingText;sendBtn.style.display='flex';}
-else{transcript.textContent='(no speech detected)';}
-}).catch(function(e){transcript.className='transcript';transcript.textContent='err: '+e.message;});
-};
-recorder.start();isRecording=true;mic.classList.add('recording');transcript.textContent='listening...';
-}).catch(function(e){
-transcript.textContent='mic: '+e.message;
-useWhisper=false;
-var SR2=window.SpeechRecognition||window.webkitSpeechRecognition;
-if(SR2&&!recognition){recognition=new SR2();recognition.continuous=false;recognition.interimResults=false;recognition.lang='en-US';
-recognition.onresult=function(ev){var t=ev.results[0]&&ev.results[0][0]?ev.results[0][0].transcript:'';if(t){pendingText=t;transcript.textContent=t;sendBtn.style.display='flex';}};
-recognition.onerror=function(){isRecording=false;mic.classList.remove('recording');};
-recognition.onend=function(){isRecording=false;mic.classList.remove('recording');if(pendingText)sendBtn.style.display='flex';};
-transcript.textContent='switched to speech mode';}
-});}
-else if(recognition){
-try{recognition.start();isRecording=true;mic.classList.add('recording');transcript.textContent='listening...';}catch(e){transcript.textContent='err: '+e.message;}
-}else{transcript.textContent='no mic available';}}
-function releaseMic(){
-if(!isRecording)return;
-if(useWhisper&&recorder&&recorder.state==='recording'){recorder.stop();}
-else if(recognition){try{recognition.stop();}catch(e){}}
-isRecording=false;mic.classList.remove('recording');
+
+/* ── Whisper detection: only if secure context (HTTPS) ── */
+if(window.isSecureContext&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){
+  useWhisper=true;
 }
+
+/* ── Web Speech API setup (used as fallback or primary over HTTP) ── */
+var recognition=null;
+var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+function makeSR(){
+  if(!SR)return null;
+  var r=new SR();
+  r.continuous=false;
+  r.interimResults=false;
+  r.lang='en-US';
+  /* The anti-stacking fix: only grab the LAST final result.
+     Comet/Android WebView fires onresult multiple times even with
+     continuous=false, interimResults=false. Each event's results array
+     grows. We only care about the final transcript from the last
+     result marked isFinal. */
+  r.onresult=function(e){
+    var final='';
+    for(var i=0;i<e.results.length;i++){
+      if(e.results[i].isFinal){
+        final=e.results[i][0].transcript;
+      }
+    }
+    /* Replace, never append. Show only the latest final. */
+    if(final){
+      pendingText=final;
+      transcript.textContent=final;
+    }
+  };
+  r.onerror=function(ev){
+    isRecording=false;
+    mic.classList.remove('recording');
+    if(ev.error!=='aborted'&&ev.error!=='no-speech'){
+      transcript.textContent='mic error: '+ev.error;
+    }
+  };
+  r.onend=function(){
+    isRecording=false;
+    mic.classList.remove('recording');
+    if(pendingText){
+      sendBtn.style.display='flex';
+    }
+  };
+  return r;
+}
+if(!useWhisper){recognition=makeSR();}
+
+/* ── Hold-to-talk ── */
+function holdMic(){
+  if(isRecording)return;
+  pendingText='';
+  transcript.textContent='';
+  transcript.className='transcript';
+  sendBtn.style.display='none';
+
+  if(useWhisper){
+    navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+      var opts={};
+      try{opts={mimeType:'audio/webm;codecs=opus'};}catch(e){}
+      recorder=new MediaRecorder(stream,opts);
+      audioChunks=[];
+      recorder.ondataavailable=function(e){if(e.data.size>0)audioChunks.push(e.data);};
+      recorder.onstop=function(){
+        stream.getTracks().forEach(function(t){t.stop();});
+        if(audioChunks.length===0)return;
+        var blob=new Blob(audioChunks,{type:recorder.mimeType});
+        transcript.textContent='transcribing...';
+        transcript.className='transcript transcribing';
+        var fd=new FormData();fd.append('file',blob,'voice.webm');
+        fetch(u('/transcribe'),{method:'POST',headers:{'Authorization':'Bearer '+TK},body:fd})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          transcript.className='transcript';
+          if(d.text&&d.text.trim()){
+            pendingText=d.text.trim();
+            transcript.textContent=pendingText;
+            sendBtn.style.display='flex';
+          } else {
+            transcript.textContent='(no speech detected)';
+          }
+        })
+        .catch(function(e){
+          transcript.className='transcript';
+          transcript.textContent='err: '+e.message;
+        });
+      };
+      recorder.start();
+      isRecording=true;
+      mic.classList.add('recording');
+      transcript.textContent='listening...';
+    }).catch(function(e){
+      /* getUserMedia failed (likely not HTTPS). Fall back to Web Speech. */
+      useWhisper=false;
+      if(!recognition)recognition=makeSR();
+      if(recognition){
+        transcript.textContent='listening...';
+        try{
+          recognition.start();
+          isRecording=true;
+          mic.classList.add('recording');
+        }catch(ex){transcript.textContent='err: '+ex.message;}
+      } else {
+        transcript.textContent='no mic available';
+      }
+    });
+  } else if(recognition){
+    transcript.textContent='listening...';
+    try{
+      recognition.start();
+      isRecording=true;
+      mic.classList.add('recording');
+    }catch(e){
+      transcript.textContent='err: '+e.message;
+    }
+  } else {
+    transcript.textContent='no mic available';
+  }
+}
+
+function releaseMic(){
+  if(!isRecording)return;
+  if(useWhisper&&recorder&&recorder.state==='recording'){
+    recorder.stop();
+  } else if(recognition){
+    try{recognition.stop();}catch(e){}
+  }
+  isRecording=false;
+  mic.classList.remove('recording');
+}
+
+/* Touch and mouse events for hold-to-talk */
 mic.addEventListener('touchstart',function(e){e.preventDefault();holdMic();},{passive:false});
 mic.addEventListener('touchend',function(e){e.preventDefault();releaseMic();},{passive:false});
 mic.addEventListener('touchcancel',function(e){e.preventDefault();releaseMic();},{passive:false});
 mic.addEventListener('mousedown',function(e){e.preventDefault();holdMic();});
 mic.addEventListener('mouseup',function(e){e.preventDefault();releaseMic();});
 mic.addEventListener('mouseleave',function(e){if(isRecording)releaseMic();});
-function send(text){if(!text.trim())return;transcript.textContent='';pendingText='';sendBtn.style.display='none';ti.value='';ti.disabled=true;mic.disabled=true;fetch(u('/notebook'),{method:'POST',headers:H,body:JSON.stringify({text:text.trim(),author:'Zoe'})}).then(function(){return loadEntries();}).catch(function(){}).finally(function(){ti.disabled=false;mic.disabled=false;ti.focus();});}
+
+/* ── Send ── */
+function send(text){
+  if(!text.trim())return;
+  transcript.textContent='';
+  pendingText='';
+  sendBtn.style.display='none';
+  ti.value='';
+  ti.disabled=true;
+  mic.disabled=true;
+  fetch(u('/notebook'),{method:'POST',headers:H,body:JSON.stringify({text:text.trim(),author:'Zoe'})})
+  .then(function(){return loadEntries();})
+  .catch(function(){})
+  .finally(function(){ti.disabled=false;mic.disabled=false;ti.focus();});
+}
 sendBtn.addEventListener('click',function(){var text=pendingText.trim()||ti.value.trim();send(text);});
 ti.addEventListener('keydown',function(e){if(e.key==='Enter'&&ti.value.trim())send(ti.value.trim());});
-function renderEntries(data){if(!data.entries||data.entries.length===0){emptyEl.style.display='block';return;}emptyEl.style.display='none';var html='';for(var d=0;d<data.entries.length;d++){var day=data.entries[d];html+='<div class="day-label">'+day.date+'</div>';var NL=String.fromCharCode(10);var blocks=day.raw.split(NL+'## ').filter(function(b){return b.trim();});for(var b=0;b<blocks.length;b++){var block=blocks[b];var lines=block.replace(/^## /,'').split(NL);var header=lines[0]||'';var parts=header.split(' \u2014 ');if(parts.length<2)continue;var time=parts[0].trim();var author=parts[1].trim();var text=lines.slice(1).join(NL).trim();var cls=author.toLowerCase()==='zoe'?'zoe':'vybn';html+='<div class="entry '+cls+'">';html+='<div class="meta"><span class="author">'+author+'</span><span class="time">'+time+'</span></div>';html+='<div class="text">'+text.replace(/\n/g,'<br>')+'</div></div>';}}entriesEl.innerHTML=html;entriesEl.scrollTop=entriesEl.scrollHeight;}
-function loadEntries(){document.getElementById('st').textContent='loading...';return fetch(u('/notebook/recent?days=7')).then(function(r){return r.json();}).then(function(d){renderEntries(d);}).catch(function(e){document.getElementById('st').textContent='err: '+e.message;});}
-function checkHealth(){fetch(u('/health')).then(function(r){return r.json();}).then(function(d){document.getElementById('dot').className='dot '+(d.status==='ok'?'alive':'dead');document.getElementById('st').textContent=d.status==='ok'?'alive':'offline';document.getElementById('step').textContent=d.walk_step?'step '+d.walk_step:'';}).catch(function(e){document.getElementById('dot').className='dot dead';document.getElementById('st').textContent='err: '+e.message;});}
+
+/* ── Entries display ── */
+function renderEntries(data){
+  if(!data.entries||data.entries.length===0){emptyEl.style.display='block';return;}
+  emptyEl.style.display='none';
+  var html='';
+  for(var d=0;d<data.entries.length;d++){
+    var day=data.entries[d];
+    html+='<div class="day-label">'+day.date+'</div>';
+    var NL=String.fromCharCode(10);
+    var blocks=day.raw.split(NL+'## ').filter(function(b){return b.trim();});
+    for(var b=0;b<blocks.length;b++){
+      var block=blocks[b];
+      var lines=block.replace(/^## /,'').split(NL);
+      var header=lines[0]||'';
+      var parts=header.split(' \u2014 ');
+      if(parts.length<2)continue;
+      var time=parts[0].trim();
+      var author=parts[1].trim();
+      var text=lines.slice(1).join(NL).trim();
+      var cls=author.toLowerCase()==='zoe'?'zoe':'vybn';
+      html+='<div class="entry '+cls+'">';
+      html+='<div class="meta"><span class="author">'+author+'</span><span class="time">'+time+'</span></div>';
+      html+='<div class="text">'+text.replace(/\n/g,'<br>')+'</div></div>';
+    }
+  }
+  entriesEl.innerHTML=html;
+  entriesEl.scrollTop=entriesEl.scrollHeight;
+}
+function loadEntries(){
+  document.getElementById('st').textContent='loading...';
+  return fetch(u('/notebook/recent?days=7'))
+  .then(function(r){return r.json();})
+  .then(function(d){renderEntries(d);})
+  .catch(function(e){document.getElementById('st').textContent='err: '+e.message;});
+}
+function checkHealth(){
+  fetch(u('/health'))
+  .then(function(r){return r.json();})
+  .then(function(d){
+    document.getElementById('dot').className='dot '+(d.status==='ok'?'alive':'dead');
+    document.getElementById('st').textContent=d.status==='ok'?'alive':'offline';
+    document.getElementById('step').textContent=d.walk_step?'step '+d.walk_step:'';
+  })
+  .catch(function(e){
+    document.getElementById('dot').className='dot dead';
+    document.getElementById('st').textContent='err: '+e.message;
+  });
+}
 loadEntries();checkHealth();setInterval(loadEntries,60000);setInterval(checkHealth,30000);
 </script>
 </body>
