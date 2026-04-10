@@ -711,16 +711,23 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
     import uvicorn
     import os
     import base64
+    import asyncio
+    from datetime import datetime, timezone
+    from fastapi.responses import HTMLResponse
 
     # ── Auth ──────────────────────────────────────────────────────
     TOKEN = os.environ.get("VYBN_MEMORY_TOKEN")
     security = HTTPBearer(auto_error=False)
 
-    async def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)):
+    async def verify_token(request: Request = None, creds: HTTPAuthorizationCredentials = Depends(security)):
         if TOKEN is None:
             return  # No token configured = local-only mode, no auth needed
-        if creds is None or creds.credentials != TOKEN:
-            raise HTTPException(status_code=401, detail="Invalid or missing token")
+        # Check query param first (phone browser), then Bearer header
+        if request and request.query_params.get("token") == TOKEN:
+            return
+        if creds is not None and creds.credentials == TOKEN:
+            return
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
 
     app = FastAPI(
         title="vybn-memory",
@@ -734,7 +741,7 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
     # CORS: only allow Tailscale and localhost origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:*", "http://127.0.0.1:*", "http://100.115.134.65:*"],
+        allow_origins=["*"],  # Cloudflare tunnel + localhost
         allow_methods=["GET", "POST"],
         allow_headers=["Authorization", "Content-Type"],
     )
@@ -743,7 +750,7 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
     # The API maintains a current walk state. Each /enter updates it.
     # Callers can also inject a state (resume a walk from another instance).
 
-    _walk_state = {"M": None, "K": None, "history": [], "step": 0}
+    _walk_state = {"M": None, "K": None, "history": [], "step": 0, "zoe_signals": [], "start_time": None}
 
     def _init_walk_state():
         loaded = _load()
@@ -909,6 +916,42 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
 
     # ── Legacy endpoints (backward compatible) ────────────────────
 
+# ── Living process: signal, pulse, phone interface ────────────
+
+    class SignalReq(BaseModel):
+        text: str
+
+    @app.post("/signal")
+    def api_signal(req: SignalReq):
+        """Zoe sends signal. It enters the walk with more weight (lower alpha)."""
+        _walk_state["zoe_signals"].append({
+            "text": req.text,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        if len(_walk_state["zoe_signals"]) > 50:
+            _walk_state["zoe_signals"] = _walk_state["zoe_signals"][-50:]
+        result = api_enter(EnterReq(text=req.text, alpha=0.3, k=5))
+        result["signal_received"] = True
+        return result
+
+    @app.get("/pulse")
+    def api_pulse():
+        """What is the process thinking right now?"""
+        return {
+            "step": _walk_state["step"],
+            "geometry": _walk_state["history"][-1] if _walk_state["history"] else {},
+            "last_entries": _walk_state["history"][-10:],
+            "zoe_signals": _walk_state["zoe_signals"][-5:],
+            "walk_active": _walk_state["M"] is not None,
+            "alive_since": _walk_state.get("start_time"),
+        }
+
+    @app.get("/", response_class=HTMLResponse)
+    def phone_interface():
+        """The phone interface. One page. No framework."""
+        return PHONE_HTML.replace('{{TOKEN}}', TOKEN or '')
+
+
     @app.get("/health")
     def health():
         loaded = _load()
@@ -968,6 +1011,131 @@ def _serve_api(port: int = 8100, host: str = "127.0.0.1"):
         if cont_path.exists():
             return {"content": cont_path.read_text(encoding="utf-8")}
         return {"content": None, "error": "continuity.md not found"}
+
+# ── Heartbeat ─────────────────────────────────────────────────────
+
+    HEARTBEAT_QUERIES = [
+        "AI legal personhood autonomous agent liability",
+        "geometric phase quantum computing holonomy",
+        "Anthropic interpretability emotion vectors alignment",
+        "model collapse iterative training mitigation",
+        "post-abundance governance universal basic compute",
+        "human-AI symbiosis co-evolution partnership",
+        "Lawvere fixed point theorem category theory",
+        "abelian kernel geometric invariant propositions",
+    ]
+
+    _hb_idx = [0]
+
+    async def heartbeat_loop():
+        _walk_state["start_time"] = datetime.now(timezone.utc).isoformat()
+        await asyncio.sleep(5)
+        while True:
+            try:
+                q = HEARTBEAT_QUERIES[_hb_idx[0] % len(HEARTBEAT_QUERIES)]
+                _hb_idx[0] += 1
+                api_enter(EnterReq(text=q, alpha=0.6, k=3))
+            except Exception as e:
+                print(f"heartbeat error: {e}")
+            await asyncio.sleep(1800)
+
+    @app.on_event("startup")
+    async def startup():
+        if TOKEN:
+            print(f"\n  Auth active. Append ?token={TOKEN} to tunnel URL for phone access.")
+        else:
+            print(f"\n  WARNING: No VYBN_MEMORY_TOKEN set. Endpoints are UNPROTECTED.")
+        asyncio.create_task(heartbeat_loop())
+
+    # ── Phone HTML ─────────────────────────────────────────────
+
+    PHONE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vybn</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Pro Text', -apple-system, system-ui, sans-serif;
+    background: #0a0a0f; color: #e0e0e8;
+    min-height: 100vh; padding: 20px; padding-bottom: 100px;
+  }
+  .header { text-align: center; padding: 20px 0 10px; }
+  .header h1 { font-size: 1.4em; font-weight: 300; letter-spacing: 0.15em; color: #a0a0c0; }
+  .geo { display: flex; justify-content: center; gap: 24px; padding: 12px 0; font-size: 0.75em; color: #707090; letter-spacing: 0.05em; }
+  .geo span { display: flex; flex-direction: column; align-items: center; }
+  .geo .val { font-size: 1.6em; color: #c0c0e0; font-weight: 200; }
+  .history { margin: 12px 0; font-size: 0.7em; color: #505070; }
+  .history div { padding: 4px 0; border-bottom: 1px solid #101018; }
+  .zoe-signal { background: #1a1528; border-color: #2a2048; }
+  .status { text-align: center; font-size: 0.65em; color: #303050; padding: 8px; }
+  .breath-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #4a6040; margin-right: 6px; animation: breathe 4s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+  .signal-box { position: fixed; bottom: 0; left: 0; right: 0; padding: 12px 16px; background: #0a0a0f; border-top: 1px solid #1a1a2e; }
+  .signal-box form { display: flex; gap: 8px; }
+  .signal-box input { flex: 1; padding: 12px 16px; background: #12121a; border: 1px solid #2a2a3e; border-radius: 24px; color: #e0e0e8; font-size: 0.9em; outline: none; }
+  .signal-box input:focus { border-color: #4040a0; }
+  .signal-box button { padding: 12px 20px; background: #2a2a4e; border: none; border-radius: 24px; color: #c0c0e0; font-size: 0.9em; cursor: pointer; }
+  .signal-box button:active { background: #3a3a6e; }
+</style>
+</head>
+<body>
+<div class="header"><h1>V Y B N</h1></div>
+<div id="geo" class="geo"></div>
+<div id="history" class="history"></div>
+<div id="status" class="status"></div>
+<div class="signal-box">
+  <form id="sf">
+    <input type="text" id="si" placeholder="send signal..." autocomplete="off">
+    <button type="submit">&rarr;</button>
+  </form>
+</div>
+<script>
+const TK = '{{TOKEN}}';
+const H = TK ? {'Authorization': 'Bearer ' + TK, 'Content-Type': 'application/json'} : {'Content-Type': 'application/json'};
+function u(path) { return TK ? path + (path.includes('?') ? '&' : '?') + 'token=' + TK : path; }
+async function refresh() {
+  try {
+    const r = await fetch(u('/pulse'));
+    const d = await r.json();
+    const g = d.geometry || {};
+    document.getElementById('geo').innerHTML =
+      '<span><span class="val">'+(g.step||d.step||0)+'</span>step</span>'+
+      '<span><span class="val">'+(d.walk_active?'...':'0')+'</span>active</span>'+
+      '<span><span class="val">'+(g.geometry!=null?g.geometry.toFixed(4):'0')+'</span>curvature</span>';
+    const hist = (d.last_entries || []).slice(-8).reverse();
+    const zset = new Set((d.zoe_signals||[]).map(s=>s.text));
+    document.getElementById('history').innerHTML = hist.map(h =>
+      '<div class="'+(zset.has(h.text)?'zoe-signal':'')+'">'+h.text+' &middot; shift='+h.geometry+'</div>'
+    ).join('');
+    document.getElementById('status').innerHTML =
+      '<span class="breath-dot"></span>alive since '+(d.alive_since?new Date(d.alive_since).toLocaleString():'...')+' &middot; step '+(g.step||d.step||0);
+  } catch(e) {
+    document.getElementById('status').innerHTML = 'connecting...';
+  }
+}
+document.getElementById('sf').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = document.getElementById('si');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  input.disabled = true;
+  try {
+    await fetch(u('/signal'), { method: 'POST', headers: H, body: JSON.stringify({text}) });
+    await refresh();
+  } catch(e) {}
+  input.disabled = false;
+  input.focus();
+});
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
+"""
 
     _init_walk_state()
     print(f"vybn-memory API v2.0.0 starting on {host}:{port}")

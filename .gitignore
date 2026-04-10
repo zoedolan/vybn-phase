@@ -1,2 +1,6 @@
 __pycache__/
-__pycache__/
+.env
+*.bak
+*.token
+memory_token*
+
