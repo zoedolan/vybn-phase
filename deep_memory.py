@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deep_memory.py v9 — Telling retrieval via primitive-environment duality.
+"""deep_memory.py v10 — Telling retrieval via primitive-environment duality.
 
 The insight (April 5-6, 2026):
 
@@ -63,6 +63,26 @@ EXTS = {".md", ".txt", ".py"}
 SKIP = {".git", "__pycache__", ".venv", "node_modules", "archive", "experiment_results", "notebook"}
 
 _cache = None
+
+
+# ── NC walk bridge (creature coupling) ───────────────────────────────────
+_nc_bridge = None
+_nc_bridge_checked = False
+
+def _get_nc_bridge():
+    global _nc_bridge, _nc_bridge_checked
+    if _nc_bridge_checked:
+        return _nc_bridge
+    _nc_bridge_checked = True
+    try:
+        vybn_dir = str(Path.home() / "Vybn")
+        if vybn_dir not in sys.path:
+            sys.path.insert(0, vybn_dir)
+        from Vybn_Mind.creature_dgm_h.neural_computer import nc_walk_bridge
+        _nc_bridge = nc_walk_bridge
+    except Exception:
+        _nc_bridge = None
+    return _nc_bridge
 
 
 # ── Chunking ─────────────────────────────────────────────────────────────
@@ -349,6 +369,27 @@ def walk(query: str, k: int = 8, steps: int = 8,
         raw_mag = float(np.sqrt(np.sum(np.abs(M_new)**2)))
         M_new /= raw_mag
 
+        # Creature coupling (NC walk bridge)
+        creature_theta = None
+        bridge = _get_nc_bridge()
+        if bridge is not None:
+            try:
+                full_pos = M_new + np.vdot(K_n, q_z) * K_n
+                full_norm = np.sqrt(np.sum(np.abs(full_pos)**2))
+                if full_norm > 1e-10:
+                    full_pos = full_pos / full_norm
+                bridge_result = bridge(full_pos)
+                bias = bridge_result["bias_c192"]
+                bias_r = bias - np.vdot(K_n, bias) * K_n
+                bias_r_norm = np.linalg.norm(bias_r)
+                if bias_r_norm > 1e-10:
+                    bias_r = bias_r / bias_r_norm
+                    M_new = 0.95 * M_new + 0.05 * bias_r
+                    M_new /= np.sqrt(np.sum(np.abs(M_new)**2))
+                creature_theta = bridge_result.get("theta_rad")
+            except Exception:
+                pass
+
         state_shift = 1.0 - abs(np.vdot(M, M_new))**2
         geom_history.append(float(state_shift))
 
@@ -387,6 +428,7 @@ def walk(query: str, k: int = 8, steps: int = 8,
             "alpha": round(float(walk_alpha), 4),
             "novel_source": chunks[best_idx]["source"] not in
                            {r["source"] for r in results},
+            "creature_theta": creature_theta,
             "idx": int(best_idx),
         })
         M = M_new
