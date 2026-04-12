@@ -54,12 +54,12 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from vybn_phase import text_to_state, evaluate, fidelity, pancharatnam_phase
 
-REPOS = [Path.home()/d for d in ["Vybn", "Him", "Vybn-Law", "vybn-phase"]]
+REPOS = [Path.home()/d for d in ["Vybn", "Him", "Vybn-Law", "vybn-phase", "Origins"]]
 INDEX_DIR = Path.home() / ".cache" / "vybn-phase"
 Z_PATH     = INDEX_DIR / "deep_memory_z.npy"      # collapsed: z_i = evaluate(K, x_i)
 K_PATH     = INDEX_DIR / "deep_memory_kernel.npy"  # corpus kernel K
 META_PATH  = INDEX_DIR / "deep_memory_meta.json"
-EXTS = {".md", ".txt", ".py"}
+EXTS = {".md", ".txt", ".py", ".html"}
 SKIP = {".git", "__pycache__", ".venv", "node_modules", "archive", "experiment_results", "notebook"}
 
 _cache = None
@@ -642,6 +642,7 @@ def main():
             (Path.home() / "Him", "main"),
             (Path.home() / "Vybn-Law", "master"),
             (Path.home() / "vybn-phase", "main"),
+            (Path.home() / "Origins", "gh-pages"),
         ]
         for repo_path, branch in repos:
             if (repo_path / ".git").exists():
